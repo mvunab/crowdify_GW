@@ -1,14 +1,39 @@
-fastapi==0.115.2
-uvicorn[standard]==0.30.6
-pydantic==2.9.2
-pydantic-settings==2.4.0
-SQLAlchemy==2.0.36
-alembic==1.13.2
-psycopg[binary,pool]==3.2.3
-passlib[bcrypt]==1.7.4
-python-jose[cryptography]==3.3.0
+# FastAPI y servidor
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
 email-validator==2.2.0
-celery==5.4.0
-redis==5.0.8
-minio==7.2.9
-Jinja2==3.1.4
+
+# Database
+sqlalchemy==2.0.23
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+alembic==1.12.1
+
+# Cache y colas
+redis==5.0.1
+celery==5.3.4
+flower==2.0.1
+
+# Autenticación
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+
+# Mercado Pago
+mercadopago==2.2.0
+
+# Email
+sendgrid==6.11.0
+
+# Rate limiting
+slowapi==0.1.9
+
+# Utilities
+python-dotenv==1.0.0
+httpx==0.25.2
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
