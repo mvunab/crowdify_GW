@@ -1,4 +1,4 @@
-# Python
+# Crea .dockerignore optimizado para Poetry
 __pycache__/
 *.py[cod]
 *$py.class
@@ -22,38 +22,43 @@ wheels/
 
 # Virtual environments
 venv/
-env/
 ENV/
+env/
 .venv
 
-# Environment variables
-.env
-.env.local
-
-# IDE
+# IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Database
-*.db
-*.sqlite
-
-# Logs
-*.log
-logs/
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
+# Git
+.git/
+.gitignore
 
-# Alembic
-alembic/versions/*.pyc
+# Docs
+docs/
+*.md
+!README.md
 
+# Environment
+.env
+.env.*
+!.env.example
+
+# Poetry (no necesitamos esto en la imagen)
+poetry.lock
+
+# Logs
+*.log

@@ -1,17 +1,16 @@
-version: "3.9"
 services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-tickets}
+      POSTGRES_USER: ${POSTGRES_USER:-tickets}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tickets}
     ports:
       - "5432:5432"
     volumes:
       - dbdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tickets}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -25,8 +24,8 @@ services:
     image: minio/minio:latest
     command: server /data --address :9000 --console-address :9001
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio12345}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -39,54 +38,60 @@ services:
       - "8025:8025"
 
   backend:
-    build: ./backend
+    build: .
     environment:
-      DATABASE_URL: postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@db:5432/$POSTGRES_DB
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-tickets}:${POSTGRES_PASSWORD:-tickets}@db:5432/${POSTGRES_DB:-tickets}}
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio12345}
       MINIO_SECURE: "false"
       MINIO_BUCKET_TICKETS: tickets-pdf
-      JWT_SECRET: ${JWT_SECRET}
-      QR_SECRET: ${QR_SECRET}
+      JWT_SECRET: ${JWT_SECRET:-dev-secret}
+      QR_SECRET: ${QR_SECRET:-dev-qr}
       SMTP_HOST: mailhog
       SMTP_PORT: "1025"
       SMTP_FROM: tickets@example.local
       PYTHONUNBUFFERED: "1"
+      POETRY_VIRTUALENVS_CREATE: "false"
     depends_on:
       - db
       - redis
       - minio
     ports:
       - "8000:8000"
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - .:/app
+      # Excluir cache de Poetry del volumen
+      - /app/.venv
+    command: ["poetry", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
   worker:
-    build: ./backend
+    build: .
     environment:
-      DATABASE_URL: postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@db:5432/$POSTGRES_DB
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-tickets}:${POSTGRES_PASSWORD:-tickets}@db:5432/${POSTGRES_DB:-tickets}}
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio12345}
       MINIO_SECURE: "false"
       MINIO_BUCKET_TICKETS: tickets-pdf
       SMTP_HOST: mailhog
       SMTP_PORT: "1025"
       SMTP_FROM: tickets@example.local
-      QR_SECRET: ${QR_SECRET}
+      QR_SECRET: ${QR_SECRET:-dev-qr}
+      POETRY_VIRTUALENVS_CREATE: "false"
     depends_on:
       - backend
       - redis
-    command: ["celery", "-A", "app.worker:celery_app", "worker", "-l", "INFO"]
+    command: ["poetry", "run", "celery", "-A", "app.worker:celery_app", "worker", "-l", "INFO"]
 
   pdfsvc:
     build: ./pdfsvc
     environment:
       MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio12345}
       MINIO_SECURE: "false"
     depends_on:
       - minio
