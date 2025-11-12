@@ -51,325 +51,39 @@ docker compose logs -f backend
 - Redis: `localhost:6379`
 - MinIO: `localhost:9000` (console: `9001`, user/pass: `minio`/`minio12345`)
 - Mailhog: `localhost:8025` (catches dev emails)
-- PDF Service: `localhost:9002`
+## Copilot / AI Agent Quick Instructions — Crowdify GW
 
-### Database Migrations (Alembic)
+Short, actionable guidance for AI coding agents working on this FastAPI-based ticketing gateway.
 
-**IMPORTANT**: Alembic config is in `app/alembic/alembic.ini`, NOT the root.
+- Big picture: root `main.py` aggregates routers; domain services live under `services/` and reuse shared infra in `shared/` (auth, db, cache, utils). PDF generation runs in `pdfsvc/` and Celery tasks are in `app/worker.py`.
 
-```pwsh
-# Generate migration (inside container)
-docker compose exec backend bash -lc "alembic -c app/alembic/alembic.ini revision --autogenerate -m 'description'"
+- Key files to inspect before edits: `main.py`, `app/worker.py`, `shared/database/models.py`, `shared/auth/dependencies.py`, `shared/cache/redis_client.py`, `services/*/services/*_service.py` and `services/*/routes/*.py`.
 
-# Apply migrations
-docker compose exec backend bash -lc "alembic -c app/alembic/alembic.ini upgrade head"
+- Dev commands (use in PowerShell):
+    - Start everything: `docker compose up -d --build`
+    - Run alembic (note config path): `docker compose exec backend bash -lc "alembic -c app/alembic/alembic.ini upgrade head"`
+    - Run tests in container: `docker compose exec backend pytest`
 
-# Rollback
-docker compose exec backend bash -lc "alembic -c app/alembic/alembic.ini downgrade -1"
-```
+- Conventions & patterns to follow:
+    - All API routers use prefix `/api/v1/` (see `main.py`). Keep route handlers thin; move logic to service classes in `services/*/services/`.
+    - DB sessions: always use `Depends(get_db)` from `shared/database/session.py` (async SQLAlchemy). Do not instantiate sessions manually.
+    - IDs are UUIDs (SQLAlchemy UUID(as_uuid=True)). Accept `str` in routes and convert with `UUID(id_str)` inside services.
+    - Distributed safety: use `DistributedLock` from `shared/cache/redis_client.py` around capacity/ticket generation and payment-critical sections.
+    - Auth: JWT handled in `shared/auth/jwt_handler.py`; use DI helpers in `shared/auth/dependencies.py`. Required claims: `sub`/`user_id`, `email`, `role` (roles: `user`, `admin`, `scanner`, `coordinator`).
 
-**Models Location**: All SQLAlchemy models are in `shared/database/models.py` (single file, ~500 lines). Update this file for schema changes.
+- External integrations:
+    - MercadoPago logic: `services/ticket_purchase/services/mercado_pago_service.py`; webhook endpoint at `/api/v1/purchases/webhook`.
+    - Emails: `services/notifications/services/email_service.py` (Mailhog local, SendGrid in prod).
+    - PDF generation: `pdfsvc/` microservice (port 9002) called by Celery tasks.
 
-### Poetry Dependency Management
+- Environment & infra notes:
+    - Alembic config lives at `app/alembic/alembic.ini`.
+    - Use Poetry inside container for deps (do not edit `requirements.txt` directly).
+    - Common local ports: backend 8000, Postgres 5432, Redis 6379, MinIO 9000, Mailhog 8025, pdfsvc 9002.
 
-**This project uses Poetry**, not pip directly. The `pyproject.toml` defines dependencies.
+- Quick examples (imports you will commonly edit/add):
+    - `from shared.database.session import get_db`
+    - `from shared.cache.redis_client import DistributedLock`
+    - `from shared.auth.dependencies import get_current_admin`
 
-```pwsh
-# Add a dependency
-docker compose exec backend poetry add httpx
-
-# Add dev dependency
-docker compose exec backend poetry add --group dev pytest-cov
-
-# Update dependencies
-docker compose exec backend poetry update
-
-# Lock file issues
-docker compose exec backend poetry lock --no-update
-```
-
-**Never** manually edit `requirements.txt` - it's generated from Poetry.
-
-## Service Architecture Patterns
-
-### Standard Service Structure
-
-Each service follows this pattern (example: `ticket_purchase`):
-
-```
-ticket_purchase/
-  ├── routes/           # FastAPI endpoints (thin controllers)
-  │   └── purchase.py   # Delegates to services
-  ├── services/         # Business logic (thick services)
-  │   ├── purchase_service.py       # Main orchestration
-  │   ├── inventory_service.py      # Capacity management
-  │   └── mercado_pago_service.py   # Payment provider
-  └── models/           # Pydantic request/response models
-      └── purchase.py
-```
-
-**Key Pattern**: Routes are thin and delegate to service classes. Services contain ALL business logic, database queries, and external integrations.
-
-### Route Registration in main.py
-
-All service routers are imported and registered in `main.py`:
-
-```python
-from services.ticket_purchase.routes.purchase import router as purchase_router
-app.include_router(purchase_router, prefix="/api/v1/purchases", tags=["purchases"])
-```
-
-**Convention**: Always use versioned API prefix `/api/v1/` and descriptive tags for OpenAPI docs.
-
-## Authentication & Authorization
-
-### JWT Token Pattern
-
-**Token Verification**: `shared/auth/jwt_handler.py` handles token encoding/decoding using `python-jose`.
-
-**Dependency Injection**: Use FastAPI dependencies from `shared/auth/dependencies.py`:
-
-```python
-from shared.auth.dependencies import get_current_user, get_current_admin, get_current_scanner, get_optional_user
-
-@router.post("/events")
-async def create_event(
-    current_user: Dict = Depends(get_current_admin)  # Requires admin role
-):
-    pass
-
-@router.get("/events")
-async def list_events(
-    current_user: Optional[Dict] = Depends(get_optional_user)  # Public endpoint
-):
-    pass
-```
-
-**Roles**: `user`, `admin`, `scanner`, `coordinator` (defined in JWT payload as `"role"` claim).
-
-**Important**: Token payload MUST contain `sub` or `user_id` (for user ID), `email`, and `role`.
-
-## Database Patterns
-
-### Async Session Management
-
-**Always** get sessions via dependency injection:
-
-```python
-from shared.database.session import get_db
-
-@router.get("/events")
-async def list_events(db: AsyncSession = Depends(get_db)):
-    # db is auto-committed/rolled back by FastAPI
-    stmt = select(Event).where(Event.name.like(f"%{search}%"))
-    result = await db.execute(stmt)
-    events = result.scalars().all()
-```
-
-**Never** create sessions manually. The `get_db()` dependency handles lifecycle.
-
-### UUID Primary Keys
-
-All IDs are `UUID(as_uuid=True)` in SQLAlchemy. When accepting IDs in routes, use `str` type and cast inside services:
-
-```python
-from uuid import UUID
-
-event_id_uuid = UUID(event_id)  # Converts string to UUID
-```
-
-### Model Relationships
-
-Models use SQLAlchemy relationships for eager/lazy loading:
-
-```python
-class Order(Base):
-    order_items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
-```
-
-**Cascade Deletes**: Most parent-child relationships use `cascade="all, delete-orphan"` to auto-delete children.
-
-## Cache & Distributed Locks
-
-### Redis Usage
-
-Import from `shared/cache/redis_client.py`:
-
-```python
-from shared.cache.redis_client import cache_get, cache_set, cache_delete, DistributedLock
-
-# Simple cache
-await cache_set("event:123", event_data, expire=3600)
-data = await cache_get("event:123")
-
-# Distributed lock (for inventory/capacity operations)
-async with DistributedLock("event:123:capacity"):
-    # Critical section - only one worker can execute this
-    event.capacity_available -= quantity
-    await db.commit()
-```
-
-**Use locks** for any operation that modifies shared resources (event capacity, ticket generation, payment processing).
-
-## External Integrations
-
-### Mercado Pago (Payment Gateway)
-
-Service: `services/ticket_purchase/services/mercado_pago_service.py`
-
-**Pattern**: Create payment preference, redirect user to `payment_link`, handle webhook callback:
-
-```python
-# 1. Create preference
-preference = mercado_pago_service.create_preference(
-    order_id=str(order.id),
-    title="Tickets",
-    total_amount=total,
-    currency="CLP"
-)
-
-# 2. User pays, Mercado Pago sends webhook to /api/v1/purchases/webhook
-# 3. Webhook handler verifies payment and generates tickets
-```
-
-**Webhook**: `/api/v1/purchases/webhook` receives payment notifications. Uses `payment_reference` to find order.
-
-### Email Sending
-
-Service: `services/notifications/services/email_service.py`
-
-**Local Dev**: Emails are sent to Mailhog (no real delivery), view at `http://localhost:8025`.
-
-**Production**: Uses SendGrid API (configured via `EMAIL_API_KEY`).
-
-### PDF Generation
-
-**Separate microservice** at `pdfsvc/` (port 9002). Called by Celery worker to generate ticket PDFs, stores in MinIO.
-
-## Celery Background Tasks
-
-Worker: `app/worker.py`
-
-**Pattern**: Celery tasks are defined in services (e.g., `services/ticket_purchase/tasks/email_tasks.py`).
-
-```python
-from app.worker import celery_app
-
-@celery_app.task
-def send_ticket_email(ticket_id: str):
-    # Async work
-    pass
-
-# Enqueue from route/service
-send_ticket_email.delay(ticket_id)
-```
-
-**Running**: Worker runs in separate container (`docker compose` service `worker`).
-
-## Frontend API Compatibility
-
-### Supabase Migration Context
-
-This backend is designed to **replace Supabase** incrementally. Current state:
-
-- **Auth**: Still using Supabase Auth (JWT tokens are Supabase-issued)
-- **Database**: Backend uses Supabase Postgres OR local Postgres (configured via `DATABASE_URL`)
-- **Models**: Mirror Supabase schema exactly (see `shared/database/models.py`)
-
-**Field Naming**: Some models use Spanish field names (e.g., `TicketChildDetail` has `nombre`, `rut`, `fecha_nacimiento`) to match Supabase schema.
-
-### Response Model Conventions
-
-Always define Pydantic response models in `services/{service}/models/`:
-
-```python
-from pydantic import BaseModel
-
-class EventResponse(BaseModel):
-    id: str  # UUID as string
-    name: str
-    starts_at: datetime
-    # ... fields match frontend expectations
-```
-
-**UUID Serialization**: Convert UUID to `str` in response models: `id=str(event.id)`.
-
-## Rate Limiting & Circuit Breakers
-
-### Rate Limiting (SlowAPI)
-
-Applied globally in `main.py`:
-
-```python
-from slowapi import Limiter
-from shared.utils.rate_limiter import limiter
-
-app.state.limiter = limiter
-```
-
-**Per-route limits**: Add decorator if needed (see SlowAPI docs).
-
-### Circuit Breaker Pattern
-
-For external services (payments, emails), use `shared/utils/circuit_breaker.py`:
-
-```python
-from shared.utils.circuit_breaker import CircuitBreaker
-
-breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
-
-result = await breaker.call(mercado_pago_api.create_preference, data)
-```
-
-## Environment Variables
-
-**Required vars** (see `.env.example`):
-
-- `DATABASE_URL`: PostgreSQL connection string (default: local Docker Postgres)
-- `REDIS_URL`: Redis connection (default: `redis://redis:6379/0`)
-- `JWT_SECRET`: Signing key for tokens (change in production!)
-- `QR_SECRET`: QR code signing secret
-- `MERCADOPAGO_ACCESS_TOKEN`: Payment gateway token
-- `MINIO_*`: Object storage config for PDFs
-- `SMTP_*`: Email config (Mailhog for dev, SendGrid for prod)
-
-**Optional vars**:
-
-- `CORS_ORIGINS`: Comma-separated allowed origins (default includes `localhost:3000`, `localhost:5173`)
-- `LOG_LEVEL`: `INFO` (default), `DEBUG`, `WARNING`
-
-## Common Pitfalls
-
-1. **Alembic Path**: Always use `-c app/alembic/alembic.ini` when running alembic commands
-2. **UUID Conversion**: Routes receive string IDs, convert to UUID inside services
-3. **Async Context**: Never use sync DB operations; always `await` queries
-4. **Redis Connection**: Call `await get_redis()` to get client, don't access `redis_client` directly
-5. **Poetry vs Pip**: Always use `poetry add`, never manually edit `requirements.txt`
-6. **Child Ticket Details**: Field names are in Spanish (`nombre`, `rut`, `fecha_nacimiento`) - don't change them
-7. **Capacity Locks**: Use `DistributedLock` when modifying `capacity_available` to prevent race conditions
-
-## Testing
-
-Run tests inside container:
-
-```pwsh
-docker compose exec backend pytest
-```
-
-**Test Structure**: Tests should be in `tests/` (not yet fully implemented in this codebase).
-
-## Debugging
-
-- **API Docs**: `http://localhost:8000/docs` (Swagger UI)
-- **Health Check**: `http://localhost:8000/health` and `http://localhost:8000/ready`
-- **Logs**: `docker compose logs -f backend` or `docker compose logs -f worker`
-- **Redis CLI**: `docker compose exec redis redis-cli`
-- **DB CLI**: `docker compose exec db psql -U tickets -d tickets`
-
-## API Documentation
-
-For complete API endpoint documentation including request/response examples, see:
-
-- **Full API Docs**: `docs/API_DOCUMENTATION.md`
-- **Interactive Swagger**: `http://localhost:8000/docs`
-- **ReDoc**: `http://localhost:8000/redoc`
+If any section should include more examples or a short checklist for code reviews (tests/linters), tell me which part to expand and I will iterate.

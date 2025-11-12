@@ -1,11 +1,14 @@
 """Rutas de administración"""
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, and_, or_
+from sqlalchemy.orm import selectinload
 from typing import Dict, Optional, List
 from datetime import datetime
+import json
 
 from shared.database.session import get_db
-from shared.auth.dependencies import get_current_admin
+from shared.auth.dependencies import get_current_admin, get_current_admin_or_coordinator
 from services.admin.models.admin import (
     OrganizerResponse,
     ScannerResponse,
@@ -34,13 +37,22 @@ from services.admin.models.admin import (
     OrderItemInfo,
     ChildDetails,
     TicketsSummary,
-    EventInfo
+    EventInfo,
+    ChildTicketInfo,
+    GlobalChildTicketsResponse
 )
 from services.admin.services.organizer_service import OrganizerService
 from services.admin.services.user_management_service import UserManagementService
 from services.admin.services.stats_service import StatsService
 from services.admin.services.admin_events_service import AdminEventsService
 from services.admin.services.tickets_admin_service import TicketsAdminService
+from shared.database.models import (
+    Ticket as TicketModel,
+    TicketChildDetail as TicketChildDetailsModel,
+    TicketChildMedication as TicketChildMedicationModel,
+    Event as EventModel,
+    Organizer as OrganizerModel
+)
 
 
 router = APIRouter()
@@ -299,35 +311,25 @@ async def get_dashboard_stats(
 
 @router.get("/events", response_model=AdminEventsListResponse)
 async def get_admin_events(
-    status: str = Query("all", description="Filtro de estado: upcoming, ongoing, past, all"),
+    event_status: str = Query("all", description="Filtro de estado: upcoming, ongoing, past, all"),
     sort: str = Query("starts_at_desc", description="Ordenamiento: starts_at_asc, starts_at_desc, revenue_desc"),
     db: AsyncSession = Depends(get_db),
-    current_user: Dict = Depends(get_current_admin)
+    current_user: Dict = Depends(get_current_admin_or_coordinator)
 ):
     """
-    Listar eventos del organizador con estadísticas
+    Listar eventos con estadísticas
 
-    Requiere autenticación de admin
+    Admin y Coordinator ven TODOS los eventos (sin filtro de organizador)
+    Requiere autenticación de admin o coordinator
     """
-    # Obtener organizer_id del usuario
-    organizer_service = OrganizerService()
-    organizer = await organizer_service.get_organizer_by_user_id(
-        db=db,
-        user_id=current_user.get("user_id")
-    )
+    role = current_user.get("role")
 
-    if not organizer:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No se encontró organizador asociado a este usuario"
-        )
-
-    # Obtener eventos con stats
+    # Admin y coordinator ven TODOS los eventos (sin filtro de organizer_id)
     events_service = AdminEventsService()
     events_with_stats = await events_service.get_events_with_stats(
         db=db,
-        organizer_id=str(organizer.id),
-        status=status,
+        organizer_id=None,  # None = sin filtro, devolver todos los eventos
+        status=event_status,
         sort=sort
     )
 
@@ -369,6 +371,9 @@ async def get_admin_events(
                         name=es.name,
                         description=es.description,
                         price=float(es.price),
+                        service_type=es.service_type,
+                        stock_total=es.stock,
+                        stock_available=es.stock_available,
                         min_age=es.min_age,
                         max_age=es.max_age
                     )
@@ -395,20 +400,18 @@ async def get_admin_events(
 @router.get("/events/{event_id}/tickets", response_model=AdminTicketsListResponse)
 async def get_event_tickets(
     event_id: str,
-    status: Optional[str] = Query(None, description="Filtrar por estado"),
+    ticket_status: Optional[str] = Query(None, description="Filtrar por estado"),
     is_child: Optional[bool] = Query(None, description="Filtrar por tipo"),
     include_child_details: bool = Query(True, description="Incluir detalles de niños"),
     search: Optional[str] = Query(None, description="Buscar por nombre o documento"),
     db: AsyncSession = Depends(get_db),
-    current_user: Dict = Depends(get_current_admin)
+    current_user: Dict = Depends(get_current_admin_or_coordinator)
 ):
     """
     Listar todos los tickets de un evento con detalles completos
 
     Requiere autenticación de admin o coordinator
     """
-    # TODO: Verificar que el evento pertenece al organizador del admin
-    # o que el usuario tiene rol coordinator para ese evento
 
     tickets_service = TicketsAdminService()
 
@@ -416,7 +419,7 @@ async def get_event_tickets(
         result = await tickets_service.get_event_tickets(
             db=db,
             event_id=event_id,
-            status=status,
+            status=ticket_status,
             is_child=is_child,
             include_child_details=include_child_details,
             search=search
@@ -518,14 +521,13 @@ async def get_event_tickets(
 async def export_children_tickets(
     event_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Dict = Depends(get_current_admin)
+    current_user: Dict = Depends(get_current_admin_or_coordinator)
 ):
     """
     Exportar datos de niños en formato JSON para generar Excel en frontend
 
     Requiere autenticación de admin o coordinator
     """
-    # TODO: Verificar que el evento pertenece al organizador del admin
 
     tickets_service = TicketsAdminService()
 
@@ -604,4 +606,92 @@ async def export_children_tickets(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
+        )
+
+
+@router.get("/tickets/children", response_model=GlobalChildTicketsResponse)
+async def get_all_children_tickets(
+    search: Optional[str] = Query(None, description="Buscar por nombre, RUT o iglesia"),
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict = Depends(get_current_admin_or_coordinator)
+):
+    """
+    Obtener todos los tickets infantiles de todos los eventos
+    Requiere autenticación de admin o coordinator
+    """
+    try:
+        # Admin y coordinator ven TODOS los tickets infantiles (sin filtro de organizer_id)
+
+        # Query: Join tickets -> ticket_child_details -> events
+        # Solo filtrar por is_child=true
+        # Eager load medications relationship
+        query = (
+            select(TicketModel, TicketChildDetailsModel, EventModel)
+            .join(TicketChildDetailsModel, TicketModel.id == TicketChildDetailsModel.ticket_id)
+            .join(EventModel, TicketModel.event_id == EventModel.id)
+            .options(selectinload(TicketChildDetailsModel.medications))
+            .where(TicketModel.is_child == True)  # ✅ Solo filtrar por is_child
+            .order_by(TicketModel.issued_at.desc())
+        )
+
+        # Apply search filter if provided
+        if search:
+            search_filter = or_(
+                TicketChildDetailsModel.nombre.ilike(f"%{search}%"),
+                TicketChildDetailsModel.rut.ilike(f"%{search}%"),
+                TicketChildDetailsModel.iglesia.ilike(f"%{search}%")
+            )
+            query = query.where(search_filter)
+
+        result = await db.execute(query)
+        rows = result.all()
+
+        # Build response
+        child_tickets = []
+        for ticket, child_details, event in rows:
+            # Get medications from relationship (TicketChildMedication objects)
+            medicamentos = []
+            if child_details.medications:
+                medicamentos = [
+                    {
+                        "nombre_medicamento": med.nombre_medicamento,
+                        "frecuencia": med.frecuencia,
+                        "observaciones": med.observaciones
+                    }
+                    for med in child_details.medications
+                ]
+
+            child_info = ChildTicketInfo(
+                ticket_id=str(ticket.id),
+                event_id=str(event.id),
+                event_name=event.name,
+                event_date=event.starts_at.isoformat() if event.starts_at else "",
+                nombre=child_details.nombre,
+                rut=child_details.rut,
+                edad=child_details.edad,
+                es_alergico=child_details.es_alergico,
+                detalle_alergias=child_details.detalle_alergias,
+                toma_medicamento=child_details.toma_medicamento,
+                medicamentos=medicamentos,
+                tiene_necesidad_especial=child_details.tiene_necesidad_especial,
+                detalle_necesidad_especial=child_details.detalle_necesidad_especial,
+                iglesia=child_details.iglesia,
+                nombre_contacto_emergencia=child_details.nombre_contacto_emergencia,
+                parentesco_contacto_emergencia=child_details.parentesco_contacto_emergencia,
+                numero_emergencia=child_details.numero_emergencia,
+                issued_at=ticket.issued_at.isoformat() if ticket.issued_at else ""
+            )
+            child_tickets.append(child_info)
+
+        return GlobalChildTicketsResponse(
+            tickets=child_tickets,
+            total_count=len(child_tickets)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener tickets infantiles: {str(e)}"
         )

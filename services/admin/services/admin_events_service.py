@@ -18,27 +18,22 @@ class AdminEventsService:
     async def get_events_with_stats(
         self,
         db: AsyncSession,
-        organizer_id: str,
+        organizer_id: Optional[str],
         status: str = "all",
         sort: str = "starts_at_desc"
     ) -> List[Dict]:
         """
-        Obtener eventos del organizador con estadísticas
+        Obtener eventos con estadísticas
 
         Args:
             db: Sesión de base de datos
-            organizer_id: ID del organizador
+            organizer_id: ID del organizador (None = todos los eventos)
             status: Filtro de estado (upcoming, ongoing, past, all)
             sort: Ordenamiento (starts_at_asc, starts_at_desc, revenue_desc)
 
         Returns:
             Lista de eventos con estadísticas
         """
-        try:
-            organizer_id_uuid = UUID(organizer_id)
-        except ValueError:
-            raise ValueError("ID de organizador inválido")
-
         # Query base: eventos con ticket_types y organizer
         stmt = (
             select(Event)
@@ -47,8 +42,15 @@ class AdminEventsService:
                 selectinload(Event.organizer),
                 selectinload(Event.event_services)
             )
-            .where(Event.organizer_id == organizer_id_uuid)
         )
+
+        # Filtrar por organizer_id solo si se proporciona
+        if organizer_id is not None:
+            try:
+                organizer_id_uuid = UUID(organizer_id)
+                stmt = stmt.where(Event.organizer_id == organizer_id_uuid)
+            except ValueError:
+                raise ValueError("ID de organizador inválido")
 
         # Filtrar por estado
         now = datetime.utcnow()

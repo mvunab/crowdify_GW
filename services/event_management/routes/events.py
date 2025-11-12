@@ -8,7 +8,9 @@ from shared.auth.dependencies import get_current_user, get_current_admin, get_op
 from services.event_management.models.event import (
     EventResponse,
     EventCreate,
-    EventUpdate
+    EventUpdate,
+    TicketTypeResponse,
+    EventServiceResponse
 )
 from services.event_management.services.event_service import EventService
 
@@ -29,12 +31,12 @@ async def get_events(
 ):
     """
     Listar eventos con filtros
-    
+
     Compatible con: eventsService.getEvents()
     Endpoint público (no requiere autenticación)
     """
     service = EventService()
-    
+
     events = await service.get_events(
         db=db,
         category=category,
@@ -44,7 +46,7 @@ async def get_events(
         limit=limit,
         offset=offset
     )
-    
+
     return [
         EventResponse(
             id=str(event.id),
@@ -60,6 +62,33 @@ async def get_events(
             category=getattr(event, 'category', 'otro'),
             description=getattr(event, 'description', None),
             image_url=getattr(event, 'image_url', None),
+            ticket_types=[
+                TicketTypeResponse(
+                    id=str(tt.id),
+                    event_id=str(tt.event_id),
+                    name=tt.name,
+                    price=float(tt.price),
+                    is_child=tt.is_child,
+                    created_at=tt.created_at
+                )
+                for tt in (event.ticket_types if hasattr(event, 'ticket_types') else [])
+            ],
+            event_services=[
+                EventServiceResponse(
+                    id=str(es.id),
+                    event_id=str(es.event_id),
+                    name=es.name,
+                    description=es.description,
+                    price=float(es.price),
+                    service_type=getattr(es, 'service_type', 'general'),
+                    stock_total=getattr(es, 'stock', 0),
+                    stock_available=getattr(es, 'stock_available', 0),
+                    min_age=es.min_age,
+                    max_age=es.max_age,
+                    created_at=es.created_at
+                )
+                for es in (event.event_services if hasattr(event, 'event_services') else [])
+            ],
             created_at=event.created_at,
             updated_at=getattr(event, 'updated_at', None)
         )
@@ -75,19 +104,19 @@ async def get_event(
 ):
     """
     Obtener evento por ID
-    
+
     Compatible con: eventsService.getEventById()
     Endpoint público (no requiere autenticación)
     """
     service = EventService()
     event = await service.get_event_by_id(db, event_id)
-    
+
     if not event:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Evento no encontrado"
         )
-    
+
     return EventResponse(
         id=str(event.id),
         organizer_id=str(event.organizer_id),
@@ -102,6 +131,33 @@ async def get_event(
         category=getattr(event, 'category', 'otro'),
         description=getattr(event, 'description', None),
         image_url=getattr(event, 'image_url', None),
+        ticket_types=[
+            TicketTypeResponse(
+                id=str(tt.id),
+                event_id=str(tt.event_id),
+                name=tt.name,
+                price=float(tt.price),
+                is_child=tt.is_child,
+                created_at=tt.created_at
+            )
+            for tt in (event.ticket_types if hasattr(event, 'ticket_types') else [])
+        ],
+        event_services=[
+            EventServiceResponse(
+                id=str(es.id),
+                event_id=str(es.event_id),
+                name=es.name,
+                description=es.description,
+                price=float(es.price),
+                service_type=getattr(es, 'service_type', 'general'),
+                stock_total=getattr(es, 'stock', 0),
+                stock_available=getattr(es, 'stock_available', 0),
+                min_age=es.min_age,
+                max_age=es.max_age,
+                created_at=es.created_at
+            )
+            for es in (event.event_services if hasattr(event, 'event_services') else [])
+        ],
         created_at=event.created_at,
         updated_at=getattr(event, 'updated_at', None)
     )
@@ -115,19 +171,19 @@ async def create_event(
 ):
     """
     Crear nuevo evento
-    
+
     Requiere: admin role
     Compatible con: adminService.createEvent()
     """
     service = EventService()
-    
+
     try:
         event = await service.create_event(
             db=db,
             event_data=event_data.dict(),
             user_id=current_user.get("user_id")
         )
-        
+
         return EventResponse(
             id=str(event.id),
             organizer_id=str(event.organizer_id),
@@ -156,12 +212,12 @@ async def update_event(
 ):
     """
     Actualizar evento
-    
+
     Requiere: admin role o ser el organizer del evento
     Compatible con: adminService.updateEvent()
     """
     service = EventService()
-    
+
     try:
         event = await service.update_event(
             db=db,
@@ -169,13 +225,13 @@ async def update_event(
             event_data=event_data.dict(exclude_unset=True),
             user_id=current_user.get("user_id")
         )
-        
+
         if not event:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Evento no encontrado"
             )
-        
+
         return EventResponse(
             id=str(event.id),
             organizer_id=str(event.organizer_id),
@@ -203,19 +259,19 @@ async def delete_event(
 ):
     """
     Eliminar evento
-    
+
     Requiere: admin role o ser el organizer del evento
     Compatible con: adminService.deleteEvent()
     """
     service = EventService()
-    
+
     try:
         success = await service.delete_event(
             db=db,
             event_id=event_id,
             user_id=current_user.get("user_id")
         )
-        
+
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

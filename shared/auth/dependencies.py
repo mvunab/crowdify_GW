@@ -32,7 +32,7 @@ async def get_current_user(
     return {
         'user_id': user_id,
         'email': payload.get('email'),
-        'role': payload.get('role', 'user')
+        'role': payload.get('app_metadata', {}).get('role', 'user')
     }
 
 
@@ -44,6 +44,19 @@ async def get_current_admin(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail='Se requieren permisos de administrador'
+        )
+    return current_user
+
+
+async def get_current_admin_or_coordinator(
+    current_user: Dict = Depends(get_current_user)
+) -> Dict:
+    '''Verificar que el usuario sea admin O coordinator'''
+    role = current_user.get('role')
+    if role not in ['admin', 'coordinator']:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Acceso denegado. Requiere rol de admin o coordinator, tu rol es: {role}"
         )
     return current_user
 
@@ -77,5 +90,5 @@ async def get_optional_user(
     return {
         'user_id': payload.get('sub') or payload.get('user_id'),
         'email': payload.get('email'),
-        'role': payload.get('role', 'user')
+        'role': payload.get('app_metadata', {}).get('role', 'user')
     }

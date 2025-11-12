@@ -114,6 +114,9 @@ class EventServiceInfo(BaseModel):
     name: str
     description: Optional[str] = None
     price: float
+    service_type: str = "general"  # general, food, parking, child_ticket
+    stock_total: int = 0  # Cantidad inicial
+    stock_available: int = 0  # Cantidad disponible
     min_age: Optional[int] = None
     max_age: Optional[int] = None
 
@@ -292,3 +295,31 @@ class ChildrenExportResponse(BaseModel):
     """Respuesta con datos de niños para export"""
     event: EventInfo
     children: List[ChildExportData]
+
+
+class ChildTicketInfo(BaseModel):
+    """Información de ticket infantil para listado global"""
+    ticket_id: str
+    event_id: str
+    event_name: str
+    event_date: str
+    nombre: str
+    rut: str
+    edad: int
+    es_alergico: bool
+    detalle_alergias: Optional[str] = None
+    toma_medicamento: bool
+    medicamentos: List[Dict]
+    tiene_necesidad_especial: bool
+    detalle_necesidad_especial: Optional[str] = None
+    iglesia: Optional[str] = None
+    nombre_contacto_emergencia: Optional[str] = None
+    parentesco_contacto_emergencia: Optional[str] = None
+    numero_emergencia: str
+    issued_at: str
+
+
+class GlobalChildTicketsResponse(BaseModel):
+    """Respuesta para listado global de tickets infantiles"""
+    tickets: List[ChildTicketInfo]
+    total_count: int
