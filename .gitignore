@@ -32,7 +32,7 @@ ENV/
 .poetry/
 
 # Environment variables
-.env
+# .env  # ⚠️ Temporalmente comentado para desarrollo - NO DEJAR ASÍ EN PRODUCCIÓN
 .env.local
 
 # IDE

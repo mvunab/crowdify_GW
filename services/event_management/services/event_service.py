@@ -108,15 +108,47 @@ class EventService:
             starts_at=event_data["starts_at"],
             ends_at=event_data.get("ends_at"),
             capacity_total=event_data["capacity_total"],
-            capacity_available=event_data["capacity_total"],  # Inicialmente toda la capacidad está disponible
+            capacity_available=event_data["capacity_total"],
             allow_children=event_data.get("allow_children", False),
+            category=event_data.get("category", "otro"),  # ✅ Nuevo campo
+            description=event_data.get("description"),  # ✅ Nuevo campo
+            image_url=event_data.get("image_url"),  # ✅ Nuevo campo
             created_at=datetime.utcnow()
         )
-        
+
         db.add(event)
         await db.commit()
         await db.refresh(event)
-        
+
+        # ✅ Crear ticket_type "General" si se proporciona precio
+        if "price" in event_data and event_data["price"] is not None and event_data["price"] > 0:
+            ticket_type = TicketType(
+                event_id=event.id,
+                name="General",
+                price=event_data["price"],
+                is_child=False
+            )
+            db.add(ticket_type)
+            await db.commit()
+
+        # ✅ Crear event_services si se proporcionan
+        if "services" in event_data and event_data["services"]:
+            from shared.database.models import EventService as EventServiceModel
+            
+            for service_data in event_data["services"]:
+                event_service = EventServiceModel(
+                    event_id=event.id,
+                    name=service_data.get("name"),
+                    description=service_data.get("description"),
+                    price=service_data.get("price", 0),
+                    min_age=service_data.get("min_age"),
+                    max_age=service_data.get("max_age")
+                )
+                db.add(event_service)
+            
+            await db.commit()
+
+
         return event
     
     @staticmethod
@@ -177,6 +209,36 @@ class EventService:
             event.capacity_available = event_data["capacity_available"]
         if "allow_children" in event_data:
             event.allow_children = event_data["allow_children"]
+        if "category" in event_data:
+            event.category = event_data["category"]
+        if "description" in event_data:
+            event.description = event_data["description"]
+        if "image_url" in event_data:
+            event.image_url = event_data["image_url"]
+
+        # Manejar actualización de precio del ticket General
+        if "price" in event_data and event_data["price"] is not None:
+            # Buscar ticket_type General existente
+            stmt_tt = select(TicketType).where(
+                TicketType.event_id == event_id,
+                TicketType.name == "General",
+                TicketType.is_child == False
+            )
+            result_tt = await db.execute(stmt_tt)
+            ticket_type = result_tt.scalar_one_or_none()
+
+            if ticket_type:
+                # Actualizar precio existente
+                ticket_type.price = event_data["price"]
+            else:
+                # Crear nuevo ticket_type General
+                new_ticket_type = TicketType(
+                    event_id=event_id,
+                    name="General",
+                    price=event_data["price"],
+                    is_child=False
+                )
+                db.add(new_ticket_type)
         
         await db.commit()
         await db.refresh(event)

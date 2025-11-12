@@ -53,6 +53,8 @@ services:
       SMTP_PORT: "1025"
       SMTP_FROM: tickets@example.local
       PYTHONUNBUFFERED: "1"
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
       POETRY_VIRTUALENVS_CREATE: "false"
     depends_on:
       - db
