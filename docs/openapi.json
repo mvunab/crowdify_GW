@@ -1,0 +1,3720 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Crodify API",
+    "description": "Backend API para plataforma de venta de tickets para eventos",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/tickets/validate": {
+      "post": {
+        "tags": [
+          "tickets"
+        ],
+        "summary": "Validate Ticket",
+        "description": "Validar ticket mediante QR signature\n\nRequiere autenticación de scanner/admin/coordinator",
+        "operationId": "validate_ticket_api_v1_tickets_validate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TicketValidationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TicketValidationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tickets/{ticket_id}": {
+      "get": {
+        "tags": [
+          "tickets"
+        ],
+        "summary": "Get Ticket",
+        "description": "Obtener información de un ticket por ID\n\nCompatible con: ticketsService.getTicketById()",
+        "operationId": "get_ticket_api_v1_tickets__ticket_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "ticket_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ticket Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/purchases": {
+      "post": {
+        "tags": [
+          "purchases"
+        ],
+        "summary": "Create Purchase",
+        "description": "Crear orden de compra y generar link de pago\n\nCompatible con: ticketsService.purchaseTickets()",
+        "operationId": "create_purchase_api_v1_purchases_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PurchaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/purchases/webhook": {
+      "post": {
+        "tags": [
+          "purchases"
+        ],
+        "summary": "Mercado Pago Webhook",
+        "description": "Webhook para recibir notificaciones de Mercado Pago\n\nNo requiere autenticación (Mercado Pago valida la firma)",
+        "operationId": "mercado_pago_webhook_api_v1_purchases_webhook_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/purchases/{order_id}/status": {
+      "get": {
+        "tags": [
+          "purchases"
+        ],
+        "summary": "Get Order Status",
+        "description": "Obtener estado de una orden\n\nCompatible con: ticketsService.getOrderStatus()",
+        "operationId": "get_order_status_api_v1_purchases__order_id__status_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Order Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tickets/user/{user_id}": {
+      "get": {
+        "tags": [
+          "tickets"
+        ],
+        "summary": "Get User Tickets",
+        "description": "Obtener tickets de un usuario con datos del evento incluidos\n\nCompatible con: ticketsService.getUserTickets()\nOptimizado con una sola query usando JOINs",
+        "operationId": "get_user_tickets_api_v1_tickets_user__user_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Get Events",
+        "description": "Listar eventos con filtros\n\nCompatible con: eventsService.getEvents()\nEndpoint público (no requiere autenticación)",
+        "operationId": "get_events_api_v1_events_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Categoría del evento",
+              "title": "Category"
+            },
+            "description": "Categoría del evento"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Búsqueda por nombre o ubicación",
+              "title": "Search"
+            },
+            "description": "Búsqueda por nombre o ubicación"
+          },
+          {
+            "name": "date_from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fecha desde",
+              "title": "Date From"
+            },
+            "description": "Fecha desde"
+          },
+          {
+            "name": "date_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fecha hasta",
+              "title": "Date To"
+            },
+            "description": "Fecha hasta"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EventResponse"
+                  },
+                  "title": "Response Get Events Api V1 Events Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Create Event",
+        "description": "Crear nuevo evento\n\nRequiere: admin role\nCompatible con: adminService.createEvent()",
+        "operationId": "create_event_api_v1_events_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events/{event_id}": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Get Event",
+        "description": "Obtener evento por ID\n\nCompatible con: eventsService.getEventById()\nEndpoint público (no requiere autenticación)",
+        "operationId": "get_event_api_v1_events__event_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Update Event",
+        "description": "Actualizar evento\n\nRequiere: admin role o ser el organizer del evento\nCompatible con: adminService.updateEvent()",
+        "operationId": "update_event_api_v1_events__event_id__put",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Delete Event",
+        "description": "Eliminar evento\n\nRequiere: admin role o ser el organizer del evento\nCompatible con: adminService.deleteEvent()",
+        "operationId": "delete_event_api_v1_events__event_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notifications/test-email": {
+      "post": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Test Email",
+        "description": "Endpoint de prueba para enviar emails\n\nRequiere: admin role",
+        "operationId": "test_email_api_v1_notifications_test_email_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "to_email",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "To Email"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/organizer": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get Organizer Info",
+        "description": "Obtener información del organizador asociado al usuario actual\n\nRequiere autenticación de admin",
+        "operationId": "get_organizer_info_api_v1_admin_organizer_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizerResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/scanners": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get Scanners",
+        "description": "Listar todos los usuarios con rol scanner\n\nRequiere autenticación de admin",
+        "operationId": "get_scanners_api_v1_admin_scanners_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScannersListResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Create Scanner",
+        "description": "Crear un nuevo usuario con rol scanner\n\nRequiere autenticación de admin\nNota: Solo crea en DB, no en Supabase Auth (requiere configuración adicional)",
+        "operationId": "create_scanner_api_v1_admin_scanners_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateScannerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScannerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/users": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get Users",
+        "description": "Listar usuarios por rol\n\nRequiere autenticación de admin",
+        "operationId": "get_users_api_v1_admin_users_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Rol a filtrar",
+              "default": "user",
+              "title": "Role"
+            },
+            "description": "Rol a filtrar"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsersListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/users/{user_id}/role": {
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Update User Role",
+        "description": "Cambiar el rol de un usuario\n\nRequiere autenticación de admin\nNo permite cambiar el propio rol",
+        "operationId": "update_user_role_api_v1_admin_users__user_id__role_put",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserRoleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/scanners/{scanner_id}": {
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Delete Scanner",
+        "description": "Remover rol scanner de un usuario (degradar a user)\n\nRequiere autenticación de admin\nNo elimina el usuario, solo cambia su rol",
+        "operationId": "delete_scanner_api_v1_admin_scanners__scanner_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scanner_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Scanner Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteScannerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/stats": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get Dashboard Stats",
+        "description": "Obtener estadísticas del dashboard\n\nRequiere autenticación de admin",
+        "operationId": "get_dashboard_stats_api_v1_admin_stats_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "date_from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fecha desde",
+              "title": "Date From"
+            },
+            "description": "Fecha desde"
+          },
+          {
+            "name": "date_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fecha hasta",
+              "title": "Date To"
+            },
+            "description": "Fecha hasta"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardStatsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/events": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get Admin Events",
+        "description": "Listar eventos con estadísticas\n\nAdmin y Coordinator ven TODOS los eventos (sin filtro de organizador)\nRequiere autenticación de admin o coordinator",
+        "operationId": "get_admin_events_api_v1_admin_events_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "event_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Filtro de estado: upcoming, ongoing, past, all",
+              "default": "all",
+              "title": "Event Status"
+            },
+            "description": "Filtro de estado: upcoming, ongoing, past, all"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Ordenamiento: starts_at_asc, starts_at_desc, revenue_desc",
+              "default": "starts_at_desc",
+              "title": "Sort"
+            },
+            "description": "Ordenamiento: starts_at_asc, starts_at_desc, revenue_desc"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminEventsListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/events/{event_id}/tickets": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get Event Tickets",
+        "description": "Listar todos los tickets de un evento con detalles completos\n\nRequiere autenticación de admin o coordinator",
+        "operationId": "get_event_tickets_api_v1_admin_events__event_id__tickets_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          },
+          {
+            "name": "ticket_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filtrar por estado",
+              "title": "Ticket Status"
+            },
+            "description": "Filtrar por estado"
+          },
+          {
+            "name": "is_child",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filtrar por tipo",
+              "title": "Is Child"
+            },
+            "description": "Filtrar por tipo"
+          },
+          {
+            "name": "include_child_details",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Incluir detalles de niños",
+              "default": true,
+              "title": "Include Child Details"
+            },
+            "description": "Incluir detalles de niños"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Buscar por nombre o documento",
+              "title": "Search"
+            },
+            "description": "Buscar por nombre o documento"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTicketsListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/events/{event_id}/tickets/children/export": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Export Children Tickets",
+        "description": "Exportar datos de niños en formato JSON para generar Excel en frontend\n\nRequiere autenticación de admin o coordinator",
+        "operationId": "export_children_tickets_api_v1_admin_events__event_id__tickets_children_export_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChildrenExportResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/tickets/children": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get All Children Tickets",
+        "description": "Obtener todos los tickets infantiles de todos los eventos\nRequiere autenticación de admin o coordinator",
+        "operationId": "get_all_children_tickets_api_v1_admin_tickets_children_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Buscar por nombre, RUT o iglesia",
+              "title": "Search"
+            },
+            "description": "Buscar por nombre, RUT o iglesia"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GlobalChildTicketsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "description": "Health check endpoint",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "summary": "Ready",
+        "description": "Ready check endpoint - verifica conexiones",
+        "operationId": "ready_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/{full_path}": {
+      "options": {
+        "summary": "Options Handler",
+        "description": "Handler para requests OPTIONS (CORS preflight)",
+        "operationId": "options_handler__full_path__options",
+        "parameters": [
+          {
+            "name": "full_path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Full Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AdminEventResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "location_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Text"
+          },
+          "point_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Point Location"
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Starts At"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "capacity_total": {
+            "type": "integer",
+            "title": "Capacity Total"
+          },
+          "capacity_available": {
+            "type": "integer",
+            "title": "Capacity Available"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "organizer": {
+            "$ref": "#/components/schemas/OrganizerInfo"
+          },
+          "ticket_types": {
+            "items": {
+              "$ref": "#/components/schemas/TicketTypeInfo"
+            },
+            "type": "array",
+            "title": "Ticket Types"
+          },
+          "event_services": {
+            "items": {
+              "$ref": "#/components/schemas/EventServiceInfo"
+            },
+            "type": "array",
+            "title": "Event Services",
+            "default": []
+          },
+          "stats": {
+            "$ref": "#/components/schemas/EventStats"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "starts_at",
+          "capacity_total",
+          "capacity_available",
+          "category",
+          "organizer",
+          "ticket_types",
+          "stats"
+        ],
+        "title": "AdminEventResponse",
+        "description": "Respuesta con evento y estadísticas para admin"
+      },
+      "AdminEventsListResponse": {
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/AdminEventResponse"
+            },
+            "type": "array",
+            "title": "Events"
+          }
+        },
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "title": "AdminEventsListResponse",
+        "description": "Respuesta con lista de eventos para admin"
+      },
+      "AdminTicketResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "holder_first_name": {
+            "type": "string",
+            "title": "Holder First Name"
+          },
+          "holder_last_name": {
+            "type": "string",
+            "title": "Holder Last Name"
+          },
+          "holder_document_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Holder Document Type"
+          },
+          "holder_document_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Holder Document Number"
+          },
+          "is_child": {
+            "type": "boolean",
+            "title": "Is Child"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "qr_signature": {
+            "type": "string",
+            "title": "Qr Signature"
+          },
+          "issued_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Issued At"
+          },
+          "validated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validated At"
+          },
+          "used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used At"
+          },
+          "order_item": {
+            "$ref": "#/components/schemas/OrderItemInfo"
+          },
+          "child_details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChildDetails"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "holder_first_name",
+          "holder_last_name",
+          "is_child",
+          "status",
+          "qr_signature",
+          "issued_at",
+          "order_item"
+        ],
+        "title": "AdminTicketResponse",
+        "description": "Respuesta con ticket para admin"
+      },
+      "AdminTicketsListResponse": {
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/EventInfo"
+          },
+          "tickets": {
+            "items": {
+              "$ref": "#/components/schemas/AdminTicketResponse"
+            },
+            "type": "array",
+            "title": "Tickets"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/TicketsSummary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event",
+          "tickets",
+          "summary"
+        ],
+        "title": "AdminTicketsListResponse",
+        "description": "Respuesta con lista de tickets para admin"
+      },
+      "AttendeeData": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "email"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "document_type": {
+            "type": "string",
+            "title": "Document Type"
+          },
+          "document_number": {
+            "type": "string",
+            "title": "Document Number"
+          },
+          "is_child": {
+            "type": "boolean",
+            "title": "Is Child",
+            "default": false
+          },
+          "child_details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChildDetailsData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "document_type",
+          "document_number"
+        ],
+        "title": "AttendeeData"
+      },
+      "ChildComprador": {
+        "properties": {
+          "nombre": {
+            "type": "string",
+            "title": "Nombre"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          }
+        },
+        "type": "object",
+        "required": [
+          "nombre",
+          "email"
+        ],
+        "title": "ChildComprador",
+        "description": "Información del comprador"
+      },
+      "ChildDetails": {
+        "properties": {
+          "nombre": {
+            "type": "string",
+            "title": "Nombre"
+          },
+          "rut": {
+            "type": "string",
+            "title": "Rut"
+          },
+          "tipo_documento": {
+            "type": "string",
+            "title": "Tipo Documento"
+          },
+          "fecha_nacimiento": {
+            "type": "string",
+            "title": "Fecha Nacimiento"
+          },
+          "edad": {
+            "type": "integer",
+            "title": "Edad"
+          },
+          "correo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correo"
+          },
+          "toma_medicamento": {
+            "type": "boolean",
+            "title": "Toma Medicamento"
+          },
+          "es_alergico": {
+            "type": "boolean",
+            "title": "Es Alergico"
+          },
+          "detalle_alergias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detalle Alergias"
+          },
+          "nombre_contacto_emergencia": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nombre Contacto Emergencia"
+          },
+          "parentesco_contacto_emergencia": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parentesco Contacto Emergencia"
+          },
+          "numero_emergencia": {
+            "type": "string",
+            "title": "Numero Emergencia"
+          },
+          "pais_telefono": {
+            "type": "string",
+            "title": "Pais Telefono"
+          },
+          "iglesia": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iglesia"
+          },
+          "tiene_necesidad_especial": {
+            "type": "boolean",
+            "title": "Tiene Necesidad Especial"
+          },
+          "detalle_necesidad_especial": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detalle Necesidad Especial"
+          },
+          "medicamentos": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ChildMedication"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Medicamentos",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "nombre",
+          "rut",
+          "tipo_documento",
+          "fecha_nacimiento",
+          "edad",
+          "toma_medicamento",
+          "es_alergico",
+          "numero_emergencia",
+          "pais_telefono",
+          "tiene_necesidad_especial"
+        ],
+        "title": "ChildDetails",
+        "description": "Detalles de ticket de niño"
+      },
+      "ChildDetailsData": {
+        "properties": {
+          "birth_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Birth Date"
+          },
+          "allergies": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allergies"
+          },
+          "special_needs": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Special Needs"
+          },
+          "emergency_contact_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Emergency Contact Name"
+          },
+          "emergency_contact_phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Emergency Contact Phone"
+          },
+          "medications": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Medications"
+          }
+        },
+        "type": "object",
+        "title": "ChildDetailsData"
+      },
+      "ChildExportData": {
+        "properties": {
+          "ticket_id": {
+            "type": "string",
+            "title": "Ticket Id"
+          },
+          "nombre": {
+            "type": "string",
+            "title": "Nombre"
+          },
+          "rut": {
+            "type": "string",
+            "title": "Rut"
+          },
+          "tipo_documento": {
+            "type": "string",
+            "title": "Tipo Documento"
+          },
+          "fecha_nacimiento": {
+            "type": "string",
+            "title": "Fecha Nacimiento"
+          },
+          "edad": {
+            "type": "integer",
+            "title": "Edad"
+          },
+          "correo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correo"
+          },
+          "toma_medicamento": {
+            "type": "boolean",
+            "title": "Toma Medicamento"
+          },
+          "es_alergico": {
+            "type": "boolean",
+            "title": "Es Alergico"
+          },
+          "detalle_alergias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detalle Alergias"
+          },
+          "nombre_contacto_emergencia": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nombre Contacto Emergencia"
+          },
+          "parentesco_contacto_emergencia": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parentesco Contacto Emergencia"
+          },
+          "numero_emergencia": {
+            "type": "string",
+            "title": "Numero Emergencia"
+          },
+          "pais_telefono": {
+            "type": "string",
+            "title": "Pais Telefono"
+          },
+          "iglesia": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iglesia"
+          },
+          "tiene_necesidad_especial": {
+            "type": "boolean",
+            "title": "Tiene Necesidad Especial"
+          },
+          "detalle_necesidad_especial": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detalle Necesidad Especial"
+          },
+          "medicamentos": {
+            "items": {
+              "$ref": "#/components/schemas/ChildMedication"
+            },
+            "type": "array",
+            "title": "Medicamentos"
+          },
+          "ticket_status": {
+            "type": "string",
+            "title": "Ticket Status"
+          },
+          "comprador": {
+            "$ref": "#/components/schemas/ChildComprador"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ticket_id",
+          "nombre",
+          "rut",
+          "tipo_documento",
+          "fecha_nacimiento",
+          "edad",
+          "toma_medicamento",
+          "es_alergico",
+          "numero_emergencia",
+          "pais_telefono",
+          "tiene_necesidad_especial",
+          "medicamentos",
+          "ticket_status",
+          "comprador"
+        ],
+        "title": "ChildExportData",
+        "description": "Datos de niño para export"
+      },
+      "ChildMedication": {
+        "properties": {
+          "nombre_medicamento": {
+            "type": "string",
+            "title": "Nombre Medicamento"
+          },
+          "frecuencia": {
+            "type": "string",
+            "title": "Frecuencia"
+          },
+          "observaciones": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observaciones"
+          }
+        },
+        "type": "object",
+        "required": [
+          "nombre_medicamento",
+          "frecuencia"
+        ],
+        "title": "ChildMedication",
+        "description": "Medicamento de niño"
+      },
+      "ChildTicketInfo": {
+        "properties": {
+          "ticket_id": {
+            "type": "string",
+            "title": "Ticket Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "event_name": {
+            "type": "string",
+            "title": "Event Name"
+          },
+          "event_date": {
+            "type": "string",
+            "title": "Event Date"
+          },
+          "nombre": {
+            "type": "string",
+            "title": "Nombre"
+          },
+          "rut": {
+            "type": "string",
+            "title": "Rut"
+          },
+          "edad": {
+            "type": "integer",
+            "title": "Edad"
+          },
+          "es_alergico": {
+            "type": "boolean",
+            "title": "Es Alergico"
+          },
+          "detalle_alergias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detalle Alergias"
+          },
+          "toma_medicamento": {
+            "type": "boolean",
+            "title": "Toma Medicamento"
+          },
+          "medicamentos": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Medicamentos"
+          },
+          "tiene_necesidad_especial": {
+            "type": "boolean",
+            "title": "Tiene Necesidad Especial"
+          },
+          "detalle_necesidad_especial": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detalle Necesidad Especial"
+          },
+          "iglesia": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iglesia"
+          },
+          "nombre_contacto_emergencia": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nombre Contacto Emergencia"
+          },
+          "parentesco_contacto_emergencia": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parentesco Contacto Emergencia"
+          },
+          "numero_emergencia": {
+            "type": "string",
+            "title": "Numero Emergencia"
+          },
+          "issued_at": {
+            "type": "string",
+            "title": "Issued At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ticket_id",
+          "event_id",
+          "event_name",
+          "event_date",
+          "nombre",
+          "rut",
+          "edad",
+          "es_alergico",
+          "toma_medicamento",
+          "medicamentos",
+          "tiene_necesidad_especial",
+          "numero_emergencia",
+          "issued_at"
+        ],
+        "title": "ChildTicketInfo",
+        "description": "Información de ticket infantil para listado global"
+      },
+      "ChildrenExportResponse": {
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/EventInfo"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/ChildExportData"
+            },
+            "type": "array",
+            "title": "Children"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event",
+          "children"
+        ],
+        "title": "ChildrenExportResponse",
+        "description": "Respuesta con datos de niños para export"
+      },
+      "CreateScannerRequest": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "title": "Email"
+          },
+          "first_name": {
+            "type": "string",
+            "title": "First Name"
+          },
+          "last_name": {
+            "type": "string",
+            "title": "Last Name"
+          },
+          "password": {
+            "type": "string",
+            "title": "Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "email",
+          "first_name",
+          "last_name",
+          "password"
+        ],
+        "title": "CreateScannerRequest",
+        "description": "Request para crear nuevo scanner"
+      },
+      "DashboardStatsResponse": {
+        "properties": {
+          "total_events": {
+            "type": "integer",
+            "title": "Total Events"
+          },
+          "active_events": {
+            "type": "integer",
+            "title": "Active Events"
+          },
+          "total_tickets_sold": {
+            "type": "integer",
+            "title": "Total Tickets Sold"
+          },
+          "total_revenue": {
+            "type": "number",
+            "title": "Total Revenue"
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency",
+            "default": "CLP"
+          },
+          "period": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StatsPeriod"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_events",
+          "active_events",
+          "total_tickets_sold",
+          "total_revenue"
+        ],
+        "title": "DashboardStatsResponse",
+        "description": "Respuesta con estadísticas del dashboard"
+      },
+      "DeleteScannerResponse": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message",
+          "user_id"
+        ],
+        "title": "DeleteScannerResponse",
+        "description": "Respuesta al eliminar scanner"
+      },
+      "EventCreate": {
+        "properties": {
+          "organizer_id": {
+            "type": "string",
+            "title": "Organizer Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "location_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Text"
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Starts At"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "capacity_total": {
+            "type": "integer",
+            "title": "Capacity Total"
+          },
+          "allow_children": {
+            "type": "boolean",
+            "title": "Allow Children",
+            "default": false
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category",
+            "default": "otro"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "services": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Services"
+          }
+        },
+        "type": "object",
+        "required": [
+          "organizer_id",
+          "name",
+          "starts_at",
+          "capacity_total"
+        ],
+        "title": "EventCreate"
+      },
+      "EventInfo": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "EventInfo",
+        "description": "Información básica del evento"
+      },
+      "EventResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "organizer_id": {
+            "type": "string",
+            "title": "Organizer Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "location_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Text"
+          },
+          "point_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Point Location"
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Starts At"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "capacity_total": {
+            "type": "integer",
+            "title": "Capacity Total"
+          },
+          "capacity_available": {
+            "type": "integer",
+            "title": "Capacity Available"
+          },
+          "allow_children": {
+            "type": "boolean",
+            "title": "Allow Children"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category",
+            "default": "otro"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "ticket_types": {
+            "items": {
+              "$ref": "#/components/schemas/TicketTypeResponse"
+            },
+            "type": "array",
+            "title": "Ticket Types",
+            "default": []
+          },
+          "event_services": {
+            "items": {
+              "$ref": "#/components/schemas/EventServiceResponse"
+            },
+            "type": "array",
+            "title": "Event Services",
+            "default": []
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "organizer_id",
+          "name",
+          "starts_at",
+          "capacity_total",
+          "capacity_available",
+          "allow_children",
+          "created_at"
+        ],
+        "title": "EventResponse"
+      },
+      "EventServiceInfo": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "price": {
+            "type": "number",
+            "title": "Price"
+          },
+          "service_type": {
+            "type": "string",
+            "title": "Service Type",
+            "default": "general"
+          },
+          "stock_total": {
+            "type": "integer",
+            "title": "Stock Total",
+            "default": 0
+          },
+          "stock_available": {
+            "type": "integer",
+            "title": "Stock Available",
+            "default": 0
+          },
+          "min_age": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Age"
+          },
+          "max_age": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Age"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "price"
+        ],
+        "title": "EventServiceInfo",
+        "description": "Información de servicio del evento"
+      },
+      "EventServiceResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "price": {
+            "type": "number",
+            "title": "Price"
+          },
+          "service_type": {
+            "type": "string",
+            "title": "Service Type",
+            "default": "general"
+          },
+          "stock_total": {
+            "type": "integer",
+            "title": "Stock Total",
+            "default": 0
+          },
+          "stock_available": {
+            "type": "integer",
+            "title": "Stock Available",
+            "default": 0
+          },
+          "min_age": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Age"
+          },
+          "max_age": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Age"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "event_id",
+          "name",
+          "price"
+        ],
+        "title": "EventServiceResponse",
+        "description": "Modelo de respuesta para servicios del evento"
+      },
+      "EventStats": {
+        "properties": {
+          "tickets_sold": {
+            "type": "integer",
+            "title": "Tickets Sold"
+          },
+          "tickets_remaining": {
+            "type": "integer",
+            "title": "Tickets Remaining"
+          },
+          "revenue": {
+            "type": "number",
+            "title": "Revenue"
+          },
+          "sales_percentage": {
+            "type": "number",
+            "title": "Sales Percentage"
+          },
+          "services_stats": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ServiceStats"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Services Stats",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "tickets_sold",
+          "tickets_remaining",
+          "revenue",
+          "sales_percentage"
+        ],
+        "title": "EventStats",
+        "description": "Estadísticas de un evento"
+      },
+      "EventUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "location_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Text"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "capacity_total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capacity Total"
+          },
+          "capacity_available": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capacity Available"
+          },
+          "allow_children": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Children"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "services": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Services"
+          }
+        },
+        "type": "object",
+        "title": "EventUpdate"
+      },
+      "GlobalChildTicketsResponse": {
+        "properties": {
+          "tickets": {
+            "items": {
+              "$ref": "#/components/schemas/ChildTicketInfo"
+            },
+            "type": "array",
+            "title": "Tickets"
+          },
+          "total_count": {
+            "type": "integer",
+            "title": "Total Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tickets",
+          "total_count"
+        ],
+        "title": "GlobalChildTicketsResponse",
+        "description": "Respuesta para listado global de tickets infantiles"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "OrderInfo": {
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/OrderUserInfo"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user"
+        ],
+        "title": "OrderInfo",
+        "description": "Información de la orden"
+      },
+      "OrderItemInfo": {
+        "properties": {
+          "order_id": {
+            "type": "string",
+            "title": "Order Id"
+          },
+          "order": {
+            "$ref": "#/components/schemas/OrderInfo"
+          }
+        },
+        "type": "object",
+        "required": [
+          "order_id",
+          "order"
+        ],
+        "title": "OrderItemInfo",
+        "description": "Información del order item"
+      },
+      "OrderStatusResponse": {
+        "properties": {
+          "order_id": {
+            "type": "string",
+            "title": "Order Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "total": {
+            "type": "number",
+            "title": "Total"
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency"
+          },
+          "payment_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payment Provider"
+          },
+          "payment_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payment Reference"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "paid_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paid At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "order_id",
+          "status",
+          "total",
+          "currency",
+          "created_at"
+        ],
+        "title": "OrderStatusResponse"
+      },
+      "OrderUserInfo": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "title": "OrderUserInfo",
+        "description": "Información del usuario que compró"
+      },
+      "OrganizerInfo": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "org_name": {
+            "type": "string",
+            "title": "Org Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "org_name"
+        ],
+        "title": "OrganizerInfo",
+        "description": "Información básica del organizador"
+      },
+      "OrganizerResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "org_name": {
+            "type": "string",
+            "title": "Org Name"
+          },
+          "contact_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Email"
+          },
+          "contact_phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Phone"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "org_name",
+          "user_id",
+          "created_at"
+        ],
+        "title": "OrganizerResponse",
+        "description": "Respuesta con información del organizador"
+      },
+      "PurchaseRequest": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "attendees": {
+            "items": {
+              "$ref": "#/components/schemas/AttendeeData"
+            },
+            "type": "array",
+            "title": "Attendees"
+          },
+          "selected_services": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected Services"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "event_id",
+          "attendees"
+        ],
+        "title": "PurchaseRequest"
+      },
+      "PurchaseResponse": {
+        "properties": {
+          "order_id": {
+            "type": "string",
+            "title": "Order Id"
+          },
+          "payment_link": {
+            "type": "string",
+            "title": "Payment Link"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "order_id",
+          "payment_link",
+          "status"
+        ],
+        "title": "PurchaseResponse"
+      },
+      "ScannerResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "role",
+          "created_at"
+        ],
+        "title": "ScannerResponse",
+        "description": "Respuesta con información de scanner"
+      },
+      "ScannersListResponse": {
+        "properties": {
+          "scanners": {
+            "items": {
+              "$ref": "#/components/schemas/ScannerResponse"
+            },
+            "type": "array",
+            "title": "Scanners"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scanners"
+        ],
+        "title": "ScannersListResponse",
+        "description": "Respuesta con lista de scanners"
+      },
+      "ServiceStats": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "service_type": {
+            "type": "string",
+            "title": "Service Type"
+          },
+          "stock": {
+            "type": "integer",
+            "title": "Stock"
+          },
+          "sold": {
+            "type": "integer",
+            "title": "Sold"
+          },
+          "remaining": {
+            "type": "integer",
+            "title": "Remaining"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "service_type",
+          "stock",
+          "sold",
+          "remaining"
+        ],
+        "title": "ServiceStats",
+        "description": "Estadísticas de servicios adicionales"
+      },
+      "StatsPeriod": {
+        "properties": {
+          "from_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Date"
+          },
+          "to_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Date"
+          }
+        },
+        "type": "object",
+        "title": "StatsPeriod",
+        "description": "Período de tiempo para estadísticas"
+      },
+      "TicketTypeInfo": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "price": {
+            "type": "number",
+            "title": "Price"
+          },
+          "is_child": {
+            "type": "boolean",
+            "title": "Is Child"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "price",
+          "is_child"
+        ],
+        "title": "TicketTypeInfo",
+        "description": "Información de tipo de ticket"
+      },
+      "TicketTypeResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "price": {
+            "type": "number",
+            "title": "Price"
+          },
+          "is_child": {
+            "type": "boolean",
+            "title": "Is Child"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "event_id",
+          "name",
+          "price",
+          "is_child"
+        ],
+        "title": "TicketTypeResponse",
+        "description": "Modelo de respuesta para tipos de ticket"
+      },
+      "TicketValidationRequest": {
+        "properties": {
+          "qr_signature": {
+            "type": "string",
+            "title": "Qr Signature"
+          },
+          "inspector_id": {
+            "type": "string",
+            "title": "Inspector Id"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "qr_signature",
+          "inspector_id"
+        ],
+        "title": "TicketValidationRequest"
+      },
+      "TicketValidationResponse": {
+        "properties": {
+          "valid": {
+            "type": "boolean",
+            "title": "Valid"
+          },
+          "ticket_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticket Id"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "attendee_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attendee Name"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "valid"
+        ],
+        "title": "TicketValidationResponse"
+      },
+      "TicketsSummary": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "adults": {
+            "type": "integer",
+            "title": "Adults"
+          },
+          "children": {
+            "type": "integer",
+            "title": "Children"
+          },
+          "by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "By Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "adults",
+          "children",
+          "by_status"
+        ],
+        "title": "TicketsSummary",
+        "description": "Resumen de tickets"
+      },
+      "UpdateUserRoleRequest": {
+        "properties": {
+          "role": {
+            "type": "string",
+            "title": "Role"
+          }
+        },
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "title": "UpdateUserRoleRequest",
+        "description": "Request para cambiar rol de usuario"
+      },
+      "UserResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "role",
+          "created_at"
+        ],
+        "title": "UserResponse",
+        "description": "Respuesta con información de usuario"
+      },
+      "UsersListResponse": {
+        "properties": {
+          "users": {
+            "items": {
+              "$ref": "#/components/schemas/UserResponse"
+            },
+            "type": "array",
+            "title": "Users"
+          }
+        },
+        "type": "object",
+        "required": [
+          "users"
+        ],
+        "title": "UsersListResponse",
+        "description": "Respuesta con lista de usuarios"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}

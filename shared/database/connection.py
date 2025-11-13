@@ -31,6 +31,11 @@ async def init_db():
 
     logger.info(f"Initializing database connection to: {database_url.split('@')[1] if '@' in database_url else database_url}")
 
+    # Limpiar parámetros SSL de la URL (se configuran en connect_args)
+    if "?" in database_url:
+        database_url = database_url.split("?")[0]
+        logger.info("Removed query parameters from DATABASE_URL (SSL configured in connect_args)")
+
     # Convertir a async URL
     if database_url.startswith("postgresql://"):
         database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
@@ -42,16 +47,22 @@ async def init_db():
     # Configurar schema por defecto para Supabase
     connect_args = {}
     if "pooler.supabase.com" in database_url or "supabase.com" in database_url:
-        logger.info("Detected Supabase connection, configuring search_path")
+        logger.info("Detected Supabase connection, configuring search_path and SSL")
         # Para Supabase pooler, configurar search_path explícitamente
         # El pooler puede resetear el search_path, así que lo configuramos en cada conexión
+        import ssl
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
         connect_args = {
+            "ssl": ssl_context,  # SSL context para Supabase
             "server_settings": {
                 "search_path": "public",
                 "jit": "off"  # Desactivar JIT para queries rápidas
             },
-            "command_timeout": 30,  # Timeout de comandos (30s)
-            "timeout": 30,  # Timeout de conexión (30s) - permisivo para Supabase remoto
+            "command_timeout": 60,  # Timeout de comandos (60s) - más permisivo para remoto
+            "timeout": 60,  # Timeout de conexión (60s) - más permisivo para Supabase remoto
             "statement_cache_size": 100  # Cache de statements preparados
         }
 
