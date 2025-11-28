@@ -9,7 +9,6 @@ email-validator==2.2.0
 sqlalchemy==2.0.23
 asyncpg==0.29.0
 psycopg2-binary==2.9.9
-alembic==1.12.1
 
 # Cache y colas
 redis==5.0.1

@@ -48,6 +48,7 @@ class Event(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     organizer_id = Column(UUID(as_uuid=True), ForeignKey("organizers.id"), nullable=False)
+    created_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)  # Admin que creó el evento
     name = Column(String, nullable=False)
     location_text = Column(String, nullable=False)  # NOT NULL en Supabase
     point_location = Column(String, nullable=True)  # Nueva columna en Supabase
@@ -64,6 +65,7 @@ class Event(Base):
     
     # Relaciones
     organizer = relationship("Organizer", back_populates="events")
+    created_by_user = relationship("User", foreign_keys=[created_by_user_id])  # Relación con el admin creador
     ticket_types = relationship("TicketType", back_populates="event", cascade="all, delete-orphan")
     price_windows = relationship("PriceWindow", back_populates="event", cascade="all, delete-orphan")
     tickets = relationship("Ticket", back_populates="event")
@@ -109,7 +111,7 @@ class Order(Base):
     __tablename__ = "orders"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)  # Opcional - solo para admins/coordinadores
     subtotal = Column(Numeric(12, 2), nullable=False, server_default="0")
     discount_total = Column(Numeric(12, 2), nullable=False, server_default="0")
     total = Column(Numeric(12, 2), nullable=False, server_default="0")
@@ -158,6 +160,7 @@ class Ticket(Base):
     event_id = Column(UUID(as_uuid=True), ForeignKey("events.id"), nullable=False)
     holder_first_name = Column(String, nullable=False)
     holder_last_name = Column(String, nullable=False)
+    holder_email = Column(String, nullable=True, index=True)  # Email del titular para búsqueda pública
     holder_document_type = Column(String, nullable=True)  # NULLABLE en Supabase
     holder_document_number = Column(String, nullable=True)  # NULLABLE en Supabase
     is_child = Column(Boolean, nullable=True, server_default="false")

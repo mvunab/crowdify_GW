@@ -151,11 +151,8 @@ if [ "${SKIP_BUILD:-false}" != "true" ]; then
     log_info "Imágenes construidas ✓"
 fi
 
-# Ejecutar migraciones
-if [ "${SKIP_MIGRATE:-false}" != "true" ]; then
-    log_info "Ejecutando migraciones..."
-    $SSH_CMD "cd $APP_DIR && source .env.export && docker compose -f docker-compose.prod.yml run --rm backend poetry run alembic -c app/alembic/alembic.ini upgrade head" || log_warn "Error en migraciones, continuando..."
-fi
+# Migraciones ahora se manejan directamente en Supabase
+# No se requieren migraciones de Alembic
 
 # Detener servicios existentes
 log_info "Deteniendo servicios existentes..."

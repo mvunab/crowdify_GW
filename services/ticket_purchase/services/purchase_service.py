@@ -75,10 +75,15 @@ class PurchaseService:
         discount_total = 0.0  # TODO: Aplicar descuentos si hay
         total = subtotal - discount_total
         
-        # Crear orden
+        # Validar que todos los attendees tengan email
+        for attendee in request.attendees:
+            if not attendee.email:
+                raise ValueError(f"Todos los asistentes deben tener un correo electrónico. Falta email para: {attendee.name}")
+        
+        # Crear orden - user_id es opcional ahora
         order = Order(
             id=uuid.uuid4(),
-            user_id=request.user_id,
+            user_id=uuid.UUID(request.user_id) if request.user_id else None,
             subtotal=subtotal,
             discount_total=discount_total,
             total=total,
@@ -282,6 +287,7 @@ class PurchaseService:
         
         tickets = []
         commission_total = 0.0
+        attendee_index = 0  # Índice global para rastrear qué attendee corresponde a cada ticket
         
         # Obtener order items
         for order_item in order.order_items:
@@ -294,7 +300,15 @@ class PurchaseService:
                 continue
             
             # Crear un ticket por cada attendee
-            for idx, attendee_data in enumerate(attendees_data[:order_item.quantity]):
+            # IMPORTANTE: Cada ticket recibe el email del attendee correspondiente
+            # El índice del attendee corresponde al ticket (attendees[0] -> ticket 1, attendees[1] -> ticket 2, etc.)
+            # Usar índice global para asegurar que cada ticket tenga su propio attendee
+            for idx in range(order_item.quantity):
+                if attendee_index >= len(attendees_data):
+                    raise ValueError(f"No hay suficientes attendees para crear todos los tickets. Se necesitan {order_item.quantity} pero solo hay {len(attendees_data)}")
+                
+                attendee_data = attendees_data[attendee_index]
+                attendee_index += 1
                 # Crear ticket
                 ticket_id = uuid.uuid4()
                 qr_signature = generate_qr_signature(str(ticket_id))
@@ -304,12 +318,18 @@ class PurchaseService:
                 first_name = name_parts[0] if name_parts else attendee_data["name"]
                 last_name = name_parts[1] if len(name_parts) > 1 else ""
                 
+                # Normalizar email (lowercase, trim)
+                holder_email = None
+                if attendee_data.get("email"):
+                    holder_email = attendee_data["email"].lower().strip()
+                
                 ticket = Ticket(
                     id=ticket_id,
                     order_item_id=order_item.id,
                     event_id=order_item.event_id,
                     holder_first_name=first_name,
                     holder_last_name=last_name,
+                    holder_email=holder_email,  # Email del attendee correspondiente
                     holder_document_type=attendee_data.get("document_type"),
                     holder_document_number=attendee_data.get("document_number"),
                     is_child=attendee_data.get("is_child", False),
@@ -389,7 +409,7 @@ class PurchaseService:
             ticket_id=ticket.id,
             nombre=nombre,
             rut=rut,
-            correo=None,  # Se puede obtener del usuario si es necesario
+            correo=ticket.holder_email,  # Usar el email del ticket (holder_email)
             fecha_nacimiento=fecha_nacimiento or date.today(),
             edad=edad,
             tipo_documento=ticket.holder_document_type or "rut",
@@ -423,6 +443,9 @@ class PurchaseService:
     
     def _generate_idempotency_key(self, request: PurchaseRequest) -> str:
         """Generar clave de idempotencia"""
-        data = f"{request.user_id}:{request.event_id}:{len(request.attendees)}"
+        # Incluir emails en la clave para mejor unicidad
+        emails = ",".join([att.email.lower().strip() for att in request.attendees if att.email])
+        user_id = request.user_id or "anonymous"
+        data = f"{user_id}:{request.event_id}:{len(request.attendees)}:{emails}"
         return hashlib.sha256(data.encode()).hexdigest()
 

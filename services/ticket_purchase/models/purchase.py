@@ -16,15 +16,15 @@ class ChildDetailsData(BaseModel):
 
 class AttendeeData(BaseModel):
     name: str
-    email: Optional[EmailStr] = None
-    document_type: str  # RUT|PASSPORT
-    document_number: str
+    email: EmailStr  # REQUERIDO - se asignará como holder_email al ticket
+    document_type: Optional[str] = None  # RUT|PASSPORT - opcional ahora
+    document_number: Optional[str] = None  # Opcional ahora
     is_child: bool = False
     child_details: Optional[ChildDetailsData] = None
 
 
 class PurchaseRequest(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None  # Opcional - solo para admins/coordinadores
     event_id: str
     attendees: List[AttendeeData]
     selected_services: Optional[Dict[str, int]] = None  # {serviceId: quantity}

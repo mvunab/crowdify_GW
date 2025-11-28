@@ -9,7 +9,6 @@
 #   --key KEY          Ruta a la clave SSH privada
 #   --env ENV_FILE     Ruta al archivo .env en el servidor
 #   --skip-build       No reconstruir las imágenes Docker
-#   --skip-migrate     No ejecutar migraciones de base de datos
 
 set -e  # Salir si hay algún error
 
@@ -20,7 +19,6 @@ SSH_KEY="${DEPLOY_SSH_KEY:-}"
 ENV_FILE="${DEPLOY_ENV_FILE:-/opt/crowdify/.env}"
 APP_DIR="${DEPLOY_APP_DIR:-/opt/crowdify}"
 SKIP_BUILD=false
-SKIP_MIGRATE=false
 
 # Colores para output
 RED='\033[0;31m'
@@ -64,10 +62,6 @@ while [[ $# -gt 0 ]]; do
             SKIP_BUILD=true
             shift
             ;;
-        --skip-migrate)
-            SKIP_MIGRATE=true
-            shift
-            ;;
         --help)
             echo "Uso: $0 [opciones]"
             echo ""
@@ -77,7 +71,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --key KEY          Ruta a la clave SSH privada"
             echo "  --env ENV_FILE     Ruta al archivo .env en el servidor (default: /opt/crowdify/.env)"
             echo "  --skip-build       No reconstruir las imágenes Docker"
-            echo "  --skip-migrate     No ejecutar migraciones de base de datos"
             echo ""
             echo "Variables de entorno:"
             echo "  DEPLOY_SERVER      IP del servidor"
@@ -169,14 +162,8 @@ else
     log_warn "Omitiendo construcción de imágenes (--skip-build)"
 fi
 
-# Ejecutar migraciones si no se omite
-if [ "$SKIP_MIGRATE" = false ]; then
-    log_info "Ejecutando migraciones de base de datos..."
-    $SSH_CMD "cd $APP_DIR && docker compose -f docker-compose.prod.yml run --rm backend poetry run alembic -c app/alembic/alembic.ini upgrade head"
-    log_info "Migraciones ejecutadas ✓"
-else
-    log_warn "Omitiendo migraciones (--skip-migrate)"
-fi
+# Migraciones ahora se manejan directamente en Supabase
+# No se requieren migraciones de Alembic
 
 # Detener servicios existentes
 log_info "Deteniendo servicios existentes..."

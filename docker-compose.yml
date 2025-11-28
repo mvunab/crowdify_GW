@@ -86,7 +86,7 @@ services:
     depends_on:
       - backend
       - redis
-    command: ["poetry", "run", "celery", "-A", "app.worker:celery_app", "worker", "-l", "INFO"]
+    command: ["poetry", "run", "celery", "-A", "shared.cache.celery_app:celery_app", "worker", "-l", "INFO"]
 
   pdfsvc:
     build: ./pdfsvc

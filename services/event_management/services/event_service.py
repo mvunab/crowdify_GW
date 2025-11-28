@@ -120,6 +120,7 @@ class EventService:
         event = Event(
             id=UUID(event_data.get("id")) if event_data.get("id") else None,
             organizer_id=event_data["organizer_id"],
+            created_by_user_id=UUID(user_id) if user_id else None,  # Admin que crea el evento
             name=event_data["name"],
             location_text=event_data.get("location_text"),
             starts_at=event_data["starts_at"],

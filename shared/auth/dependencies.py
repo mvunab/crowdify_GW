@@ -36,6 +36,33 @@ async def get_current_user(
     }
 
 
+async def OptionalUser(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))
+) -> Optional[Dict]:
+    '''Obtener usuario actual si está autenticado, None si no lo está (para endpoints públicos)'''
+    if credentials is None:
+        return None
+    
+    try:
+        token = credentials.credentials
+        payload = await verify_token(token)
+        
+        if payload is None:
+            return None
+        
+        user_id = payload.get('sub') or payload.get('user_id')
+        if not user_id:
+            return None
+        
+        return {
+            'user_id': user_id,
+            'email': payload.get('email'),
+            'role': payload.get('app_metadata', {}).get('role', 'user')
+        }
+    except Exception:
+        return None
+
+
 async def get_current_admin(
     current_user: Dict = Depends(get_current_user)
 ) -> Dict:

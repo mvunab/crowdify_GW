@@ -1,9 +1,9 @@
 """Rutas de compra de tickets"""
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Dict
+from typing import Dict, Optional
 from shared.database.session import get_db
-from shared.auth.dependencies import get_current_user
+from shared.auth.dependencies import get_current_user, get_optional_user
 from services.ticket_purchase.models.purchase import (
     PurchaseRequest,
     PurchaseResponse,
@@ -19,19 +19,39 @@ router = APIRouter()
 async def create_purchase(
     request: PurchaseRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: Dict = Depends(get_current_user)
+    current_user: Optional[Dict] = Depends(get_optional_user)
 ):
     """
     Crear orden de compra y generar link de pago
     
     Compatible con: ticketsService.purchaseTickets()
+    
+    NOTA: user_id es opcional ahora. Si se proporciona, debe coincidir con el usuario autenticado.
+    Si no se proporciona, la compra es anónima (solo para usuarios comunes).
     """
-    # Verificar que el user_id coincide con el usuario autenticado
-    if current_user.get("user_id") != request.user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No puedes crear órdenes para otros usuarios"
-        )
+    # Si se proporciona user_id, debe coincidir con el usuario autenticado
+    if request.user_id:
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Debes estar autenticado para crear órdenes con user_id"
+            )
+        if current_user.get("user_id") != request.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No puedes crear órdenes para otros usuarios"
+            )
+    else:
+        # Compra anónima - permitir si no hay usuario autenticado
+        # Si hay usuario autenticado y es admin/coordinator, debe proporcionar user_id
+        if current_user:
+            user_role = current_user.get("role", "user")
+            if user_role in ["admin", "coordinator"]:
+                # Para admins/coordinadores, user_id es requerido
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Los administradores y coordinadores deben proporcionar user_id"
+                )
     
     service = PurchaseService()
     
@@ -103,12 +123,24 @@ async def get_order_status(
     result = await db.execute(stmt)
     order = result.scalar_one_or_none()
     
-    if order and str(order.user_id) != current_user.get("user_id"):
-        if current_user.get("role") not in ["admin", "coordinator"]:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="No tienes acceso a esta orden"
-            )
+    # Verificar acceso: si la orden tiene user_id, debe coincidir con el usuario autenticado
+    # Si no tiene user_id (compra anónima), solo admins/coordinadores pueden verla
+    if order:
+        if order.user_id:
+            # Orden con user_id - verificar que coincida
+            if str(order.user_id) != current_user.get("user_id"):
+                if current_user.get("role") not in ["admin", "coordinator"]:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="No tienes acceso a esta orden"
+                    )
+        else:
+            # Orden sin user_id (compra anónima) - solo admins/coordinadores pueden verla
+            if current_user.get("role") not in ["admin", "coordinator"]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No tienes acceso a esta orden"
+                )
     
     return OrderStatusResponse(**order_status)
 

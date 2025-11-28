@@ -1,4 +1,4 @@
-.PHONY: help up down build logs shell test migrate poetry-add poetry-update clean
+.PHONY: help up down build logs shell test poetry-add poetry-update clean
 
 help: ## Mostrar este mensaje de ayuda
 	@echo "Comandos disponibles:"
@@ -30,12 +30,6 @@ shell-db: ## Abrir psql en la base de datos
 
 test: ## Ejecutar tests
 	docker compose exec backend poetry run pytest
-
-migrate: ## Aplicar migraciones de Alembic
-	docker compose exec backend poetry run alembic -c app/alembic/alembic.ini upgrade head
-
-migrate-create: ## Crear una nueva migración (uso: make migrate-create MESSAGE="descripcion")
-	docker compose exec backend poetry run alembic -c app/alembic/alembic.ini revision --autogenerate -m "$(MESSAGE)"
 
 poetry-add: ## Agregar dependencia (uso: make poetry-add PKG=fastapi-users)
 	docker compose exec backend poetry add $(PKG)
