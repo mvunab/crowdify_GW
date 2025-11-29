@@ -323,3 +323,49 @@ class GlobalChildTicketsResponse(BaseModel):
     """Respuesta para listado global de tickets infantiles"""
     tickets: List[ChildTicketInfo]
     total_count: int
+
+
+# ==================== PENDING ORDERS ====================
+
+class TicketDetailResponse(BaseModel):
+    """Detalle de ticket en orden"""
+    id: str
+    holder_first_name: str
+    holder_last_name: str
+    holder_email: Optional[str] = None
+    status: str
+    event_id: str
+    event_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class OrderResponse(BaseModel):
+    """Respuesta con información de orden"""
+    id: str
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
+    user_name: Optional[str] = None
+    subtotal: float
+    discount_total: float
+    total: float
+    commission_total: float
+    currency: str
+    status: str
+    payment_provider: Optional[str] = None
+    payment_reference: Optional[str] = None
+    receipt_url: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    paid_at: Optional[datetime] = None
+    tickets_count: int = 0
+    tickets: Optional[List[TicketDetailResponse]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class OrdersListResponse(BaseModel):
+    """Respuesta con lista de órdenes pendientes"""
+    orders: List[OrderResponse]

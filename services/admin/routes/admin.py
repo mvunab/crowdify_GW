@@ -39,13 +39,17 @@ from services.admin.models.admin import (
     TicketsSummary,
     EventInfo,
     ChildTicketInfo,
-    GlobalChildTicketsResponse
+    GlobalChildTicketsResponse,
+    OrdersListResponse,
+    OrderResponse,
+    TicketDetailResponse
 )
 from services.admin.services.organizer_service import OrganizerService
 from services.admin.services.user_management_service import UserManagementService
 from services.admin.services.stats_service import StatsService
 from services.admin.services.admin_events_service import AdminEventsService
 from services.admin.services.tickets_admin_service import TicketsAdminService
+from services.admin.services.admin_orders_service import AdminOrdersService
 from shared.database.models import (
     Ticket as TicketModel,
     TicketChildDetail as TicketChildDetailsModel,
@@ -694,4 +698,207 @@ async def get_all_children_tickets(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al obtener tickets infantiles: {str(e)}"
+        )
+
+
+# ==================== PENDING ORDERS ====================
+
+@router.get("/orders/pending", response_model=OrdersListResponse)
+async def get_pending_orders(
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict = Depends(get_current_admin)
+):
+    """
+    Obtener todas las órdenes pendientes con método de pago bank_transfer
+
+    Requiere autenticación de admin
+    """
+    service = AdminOrdersService()
+
+    try:
+        orders_data = await service.get_pending_orders(db=db)
+
+        # Convertir a modelos Pydantic
+        orders = [
+            OrderResponse(
+                id=order["id"],
+                user_id=order["user_id"],
+                user_email=order["user_email"],
+                user_name=order["user_name"],
+                subtotal=order["subtotal"],
+                discount_total=order["discount_total"],
+                total=order["total"],
+                commission_total=order["commission_total"],
+                currency=order["currency"],
+                status=order["status"],
+                payment_provider=order["payment_provider"],
+                payment_reference=order["payment_reference"],
+                receipt_url=order["receipt_url"],
+                created_at=order["created_at"],
+                updated_at=order["updated_at"],
+                paid_at=order["paid_at"],
+                tickets_count=order["tickets_count"],
+                tickets=None  # No incluimos tickets en la lista
+            )
+            for order in orders_data
+        ]
+
+        return OrdersListResponse(orders=orders)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener órdenes pendientes: {str(e)}"
+        )
+
+
+@router.get("/orders/{order_id}", response_model=OrderResponse)
+async def get_order_detail(
+    order_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict = Depends(get_current_admin)
+):
+    """
+    Obtener detalle completo de una orden específica, incluyendo todos los tickets asociados
+
+    Requiere autenticación de admin
+    """
+    service = AdminOrdersService()
+
+    try:
+        order_data = await service.get_order_detail(db=db, order_id=order_id)
+
+        if not order_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Orden no encontrada"
+            )
+
+        # Convertir tickets a modelos Pydantic
+        tickets = None
+        if order_data.get("tickets"):
+            tickets = [
+                TicketDetailResponse(**ticket)
+                for ticket in order_data["tickets"]
+            ]
+
+        return OrderResponse(
+            id=order_data["id"],
+            user_id=order_data["user_id"],
+            user_email=order_data["user_email"],
+            user_name=order_data["user_name"],
+            subtotal=order_data["subtotal"],
+            discount_total=order_data["discount_total"],
+            total=order_data["total"],
+            commission_total=order_data["commission_total"],
+            currency=order_data["currency"],
+            status=order_data["status"],
+            payment_provider=order_data["payment_provider"],
+            payment_reference=order_data["payment_reference"],
+            receipt_url=order_data["receipt_url"],
+            created_at=order_data["created_at"],
+            updated_at=order_data["updated_at"],
+            paid_at=order_data["paid_at"],
+            tickets_count=order_data["tickets_count"],
+            tickets=tickets
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener detalle de orden: {str(e)}"
+        )
+
+
+@router.post("/orders/{order_id}/confirm", response_model=OrderResponse)
+async def confirm_order(
+    order_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict = Depends(get_current_admin)
+):
+    """
+    Confirma una orden pendiente.
+    
+    Acciones:
+    1. Cambia el estado de la orden de 'pending' → 'completed'
+    2. Cambia el estado de todos los tickets asociados de 'pending' → 'issued'
+    3. Establece paid_at en la orden
+    
+    ⚠️ IMPORTANTE: Usa stored procedure para garantizar transacciones atómicas
+    
+    Requiere autenticación de admin
+    """
+    service = AdminOrdersService()
+
+    try:
+        # Confirmar orden (usando stored procedure)
+        order_data = await service.confirm_order(db=db, order_id=order_id)
+
+        if not order_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Orden no encontrada o no está en estado pendiente"
+            )
+
+        # Convertir tickets a modelos Pydantic
+        tickets = None
+        if order_data.get("tickets"):
+            try:
+                tickets = [
+                    TicketDetailResponse(**ticket)
+                    for ticket in order_data["tickets"]
+                ]
+            except Exception as ticket_error:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error creating ticket responses: {ticket_error}, tickets data: {order_data.get('tickets')}")
+                tickets = []
+
+        try:
+            response = OrderResponse(
+                id=order_data["id"],
+                user_id=order_data["user_id"],
+                user_email=order_data["user_email"],
+                user_name=order_data["user_name"],
+                subtotal=order_data["subtotal"],
+                discount_total=order_data["discount_total"],
+                total=order_data["total"],
+                commission_total=order_data["commission_total"],
+                currency=order_data["currency"],
+                status=order_data["status"],
+                payment_provider=order_data["payment_provider"],
+                payment_reference=order_data["payment_reference"],
+                receipt_url=order_data["receipt_url"],
+                created_at=order_data["created_at"],
+                updated_at=order_data["updated_at"],
+                paid_at=order_data["paid_at"],
+                tickets_count=order_data["tickets_count"],
+                tickets=tickets
+            )
+            return response
+        except Exception as response_error:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error creating OrderResponse: {response_error}, order_data keys: {list(order_data.keys())}, order_data: {order_data}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error al construir respuesta: {str(response_error)}"
+            )
+
+    except ValueError as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"ValueError confirming order {order_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al confirmar orden: {str(e)}"
         )
