@@ -59,11 +59,18 @@ async def create_purchase(
         result = await service.create_purchase(db, request)
         return PurchaseResponse(**result)
     except ValueError as e:
+        import traceback
+        print(f"ValueError en create_purchase: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"Exception en create_purchase: {str(e)}")
+        print(f"Traceback completo: {error_trace}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error procesando compra: {str(e)}"

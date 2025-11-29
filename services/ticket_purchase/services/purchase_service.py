@@ -7,7 +7,7 @@ import uuid
 import hashlib
 from shared.database.models import (
     Order, OrderItem, Ticket, Event, TicketType, EventService,
-    TicketChildDetail, TicketChildMedication, OrderCommission
+    TicketChildDetail, TicketChildMedication, OrderCommission, OrderServiceItem
 )
 from shared.utils.qr_generator import generate_qr_signature
 from services.ticket_purchase.models.purchase import PurchaseRequest, AttendeeData
@@ -21,7 +21,14 @@ class PurchaseService:
     
     def __init__(self):
         self.inventory_service = InventoryService()
-        self.mercado_pago_service = MercadoPagoService()
+        self._mercado_pago_service = None
+    
+    @property
+    def mercado_pago_service(self):
+        """Lazy initialization de MercadoPagoService solo cuando se necesita"""
+        if self._mercado_pago_service is None:
+            self._mercado_pago_service = MercadoPagoService()
+        return self._mercado_pago_service
     
     async def create_purchase(
         self,
@@ -34,12 +41,61 @@ class PurchaseService:
         Returns:
             dict con order_id, payment_link, status
         """
-        # Verificar idempotencia
-        if request.idempotency_key:
-            cache_key = f"purchase:idempotency:{request.idempotency_key}"
-            cached = await cache_get(cache_key)
-            if cached:
-                return cached
+        # Generar o usar idempotency_key
+        idempotency_key = request.idempotency_key or self._generate_idempotency_key(request)
+        
+        # Verificar idempotencia en cache
+        cache_key = f"purchase:idempotency:{idempotency_key}"
+        cached = await cache_get(cache_key)
+        if cached:
+            return cached
+        
+        # Verificar en la base de datos si existe una orden con ese idempotency_key
+        stmt_existing = select(Order).where(Order.idempotency_key == idempotency_key)
+        result_existing = await db.execute(stmt_existing)
+        existing_order = result_existing.scalar_one_or_none()
+        
+        if existing_order:
+            # Si es transferencia bancaria y no tiene tickets, crearlos
+            if existing_order.payment_provider == "bank_transfer":
+                # Verificar si tiene tickets
+                from sqlalchemy import func
+                stmt_tickets_count = select(func.count(Ticket.id)).join(
+                    OrderItem, Ticket.order_item_id == OrderItem.id
+                ).where(OrderItem.order_id == existing_order.id)
+                result_tickets_count = await db.execute(stmt_tickets_count)
+                tickets_count = result_tickets_count.scalar() or 0
+                
+                if tickets_count == 0:
+                    # No tiene tickets, crearlos ahora
+                    await db.refresh(existing_order, ["order_items"])
+                    if existing_order.order_items:
+                        # Preparar attendees_data para esta orden
+                        attendees_data_for_existing = [
+                            {
+                                "name": att.name,
+                                "email": att.email,
+                                "document_type": att.document_type,
+                                "document_number": att.document_number,
+                                "is_child": att.is_child,
+                                "child_details": att.child_details.dict() if att.child_details and hasattr(att.child_details, 'dict') else (att.child_details if att.child_details else None)
+                            }
+                            for att in request.attendees
+                        ]
+                        
+                        tickets = await self._generate_tickets(
+                            db, existing_order, attendees_data_for_existing, ticket_status="pending"
+                        )
+                        await db.commit()
+                        await db.refresh(existing_order)
+            
+            # Retornar la orden existente
+            return {
+                "order_id": str(existing_order.id),
+                "payment_link": None if existing_order.payment_provider == "bank_transfer" else None,
+                "status": existing_order.status,
+                "payment_method": existing_order.payment_provider or "mercadopago"
+            }
         
         # Verificar que el evento existe
         stmt_event = select(Event).where(Event.id == request.event_id)
@@ -70,33 +126,54 @@ class PurchaseService:
         if not ticket_type:
             raise ValueError("No se encontró tipo de ticket para el evento")
         
-        # Calcular precios
+        # Calcular precios de tickets
         subtotal = float(ticket_type.price) * total_quantity
+        
+        # Calcular precios de servicios adicionales
+        services_subtotal = 0.0
+        if request.selected_services:
+            stmt_services = select(EventService).where(
+                EventService.event_id == request.event_id,
+                EventService.id.in_(list(request.selected_services.keys()))
+            )
+            result_services = await db.execute(stmt_services)
+            services = result_services.scalars().all()
+            
+            for service in services:
+                quantity = request.selected_services.get(str(service.id), 0)
+                if quantity > 0:
+                    services_subtotal += float(service.price) * quantity
+        
         discount_total = 0.0  # TODO: Aplicar descuentos si hay
-        total = subtotal - discount_total
+        total = subtotal + services_subtotal - discount_total
         
         # Validar que todos los attendees tengan email
         for attendee in request.attendees:
             if not attendee.email:
                 raise ValueError(f"Todos los asistentes deben tener un correo electrónico. Falta email para: {attendee.name}")
         
+        # Determinar método de pago
+        payment_method = request.payment_method or "mercadopago"
+        is_bank_transfer = payment_method == "bank_transfer"
+        
         # Crear orden - user_id es opcional ahora
         order = Order(
             id=uuid.uuid4(),
             user_id=uuid.UUID(request.user_id) if request.user_id else None,
-            subtotal=subtotal,
+            subtotal=subtotal + services_subtotal,  # Incluir servicios en subtotal
             discount_total=discount_total,
             total=total,
             currency="CLP",
             status="pending",
-            payment_provider="mercadopago",
-            idempotency_key=request.idempotency_key or self._generate_idempotency_key(request),
+            payment_provider=payment_method,
+            receipt_url=request.receipt_url if is_bank_transfer else None,
+            idempotency_key=idempotency_key,
             created_at=datetime.utcnow()
         )
         db.add(order)
         await db.flush()
         
-        # Crear order item
+        # Crear order item para tickets
         order_item = OrderItem(
             id=uuid.uuid4(),
             order_id=order.id,
@@ -104,27 +181,69 @@ class PurchaseService:
             ticket_type_id=ticket_type.id,
             quantity=total_quantity,
             unit_price=ticket_type.price,
-            final_price=total
+            final_price=subtotal
         )
         db.add(order_item)
         await db.flush()
         
-        # Guardar attendees en cache para recuperarlos después del pago
-        # Esto es necesario porque los attendees no se guardan en la BD hasta que se aprueba el pago
-        if request.idempotency_key:
+        # Crear order service items para servicios adicionales
+        if request.selected_services:
+            # Convertir las keys de string a UUID
+            service_ids = []
+            for key in request.selected_services.keys():
+                try:
+                    service_ids.append(uuid.UUID(key))
+                except (ValueError, TypeError):
+                    continue  # Saltar IDs inválidos
+            
+            if service_ids:
+                stmt_services = select(EventService).where(
+                    EventService.event_id == request.event_id,
+                    EventService.id.in_(service_ids)
+                )
+                result_services = await db.execute(stmt_services)
+                services = result_services.scalars().all()
+                
+                for service in services:
+                    quantity = request.selected_services.get(str(service.id), 0)
+                    if quantity > 0:
+                        service_item = OrderServiceItem(
+                            id=uuid.uuid4(),
+                            order_id=order.id,
+                            event_id=request.event_id,
+                            service_id=service.id,
+                            quantity=quantity,
+                            unit_price=service.price,
+                            final_price=float(service.price) * quantity
+                        )
+                        db.add(service_item)
+        
+        await db.flush()
+        
+        # Preparar datos de attendees
+        attendees_data = []
+        for att in request.attendees:
+            child_details_dict = None
+            if att.child_details:
+                # Si child_details es un objeto Pydantic, usar .dict(), si es dict, usar directamente
+                if hasattr(att.child_details, 'dict'):
+                    child_details_dict = att.child_details.dict()
+                else:
+                    child_details_dict = att.child_details
+            
+            attendees_data.append({
+                "name": att.name,
+                "email": att.email,
+                "document_type": att.document_type,
+                "document_number": att.document_number,
+                "is_child": att.is_child,
+                "child_details": child_details_dict
+            })
+        
+        # Guardar attendees en cache para recuperarlos después del pago (solo para Mercado Pago)
+        # Para transferencias bancarias, creamos tickets inmediatamente
+        if not is_bank_transfer and request.idempotency_key:
             attendees_cache_key = f"purchase:attendees:{request.idempotency_key}"
-            # Convertir a dict serializable para cache
-            attendees_data = [
-                {
-                    "name": att.name,
-                    "email": att.email,
-                    "document_type": att.document_type,
-                    "document_number": att.document_number,
-                    "is_child": att.is_child,
-                    "child_details": att.child_details.dict() if att.child_details else None
-                }
-                for att in request.attendees
-            ]
             await cache_set(attendees_cache_key, attendees_data, expire=86400)  # 24 horas
         
         # Reservar capacidad
@@ -136,41 +255,92 @@ class PurchaseService:
             await db.rollback()
             raise ValueError("No se pudo reservar capacidad")
         
-        # Crear preferencia de pago
-        try:
-            preference = self.mercado_pago_service.create_preference(
-                order_id=str(order.id),
-                title=f"Tickets - {event.name}",
-                total_amount=total,
-                currency="CLP",
-                description=f"{total_quantity} ticket(s) para {event.name}"
-            )
+        payment_link = None
+        
+        # Si es transferencia bancaria, crear tickets inmediatamente con status "pending"
+        if is_bank_transfer:
+            try:
+                # Hacer flush para asegurar que order_items estén disponibles
+                await db.flush()
+                
+                # Refrescar la orden para cargar order_items
+                await db.refresh(order, ["order_items"])
+                
+                # Verificar que order_items esté cargado
+                if not order.order_items:
+                    raise ValueError("No se encontraron order_items para crear tickets")
+                
+                # Crear tickets con status "pending" inmediatamente
+                tickets = await self._generate_tickets(
+                    db, order, attendees_data, ticket_status="pending"
+                )
+                
+                # Actualizar orden - mantener status "pending" hasta verificación manual
+                order.status = "pending"
+                
+                await db.commit()
+                await db.refresh(order)
+                
+                response = {
+                    "order_id": str(order.id),
+                    "payment_link": None,  # No hay payment_link para transferencias
+                    "status": "pending",
+                    "payment_method": "bank_transfer"
+                }
+                
+                # Guardar en cache para idempotencia
+                await cache_set(cache_key, response, expire=3600)
+                
+                return response
+                
+            except Exception as e:
+                # Si falla la creación de tickets, liberar capacidad y rollback
+                import traceback
+                error_trace = traceback.format_exc()
+                print(f"Error creando tickets para transferencia bancaria: {str(e)}")
+                print(f"Traceback: {error_trace}")
+                await self.inventory_service.release_capacity(
+                    db, request.event_id, total_quantity, "ticket_creation_failed"
+                )
+                await db.rollback()
+                raise ValueError(f"Error creando tickets: {str(e)}")
+        
+        # Si es Mercado Pago, crear preferencia de pago
+        else:
+            try:
+                preference = self.mercado_pago_service.create_preference(
+                    order_id=str(order.id),
+                    title=f"Tickets - {event.name}",
+                    total_amount=total,
+                    currency="CLP",
+                    description=f"{total_quantity} ticket(s) para {event.name}"
+                )
+                
+                order.payment_reference = preference["preference_id"]
+                payment_link = preference["payment_link"]
+                
+            except Exception as e:
+                # Si falla la creación de preferencia, liberar capacidad y rollback
+                await self.inventory_service.release_capacity(
+                    db, request.event_id, total_quantity, "payment_creation_failed"
+                )
+                await db.rollback()
+                raise ValueError(f"Error creando preferencia de pago: {str(e)}")
             
-            order.payment_reference = preference["preference_id"]
-            payment_link = preference["payment_link"]
+            await db.commit()
+            await db.refresh(order)
             
-        except Exception as e:
-            # Si falla la creación de preferencia, liberar capacidad y rollback
-            await self.inventory_service.release_capacity(
-                db, request.event_id, total_quantity, "payment_creation_failed"
-            )
-            await db.rollback()
-            raise ValueError(f"Error creando preferencia de pago: {str(e)}")
-        
-        await db.commit()
-        await db.refresh(order)
-        
-        response = {
-            "order_id": str(order.id),
-            "payment_link": payment_link,
-            "status": "pending"
-        }
-        
-        # Guardar en cache para idempotencia
-        if request.idempotency_key:
+            response = {
+                "order_id": str(order.id),
+                "payment_link": payment_link,
+                "status": "pending",
+                "payment_method": "mercadopago"
+            }
+            
+            # Guardar en cache para idempotencia
             await cache_set(cache_key, response, expire=3600)
-        
-        return response
+            
+            return response
     
     async def process_payment_webhook(
         self,
@@ -210,16 +380,22 @@ class PurchaseService:
             order.paid_at = datetime.utcnow()
             await db.flush()
             
-            # Generar tickets después de pago exitoso
-            try:
-                await self._generate_tickets(db, order)
-                await db.commit()
-            except Exception as e:
-                await db.rollback()
-                # Log error pero no fallar el webhook
-                print(f"Error generando tickets para orden {order.id}: {e}")
-                # Marcar orden como paid aunque falle la generación de tickets
-                order.status = "completed"
+            # Generar tickets después de pago exitoso (solo para Mercado Pago)
+            # Las transferencias bancarias ya tienen tickets creados con status "pending"
+            if order.payment_provider == "mercadopago":
+                try:
+                    await self._generate_tickets(db, order, ticket_status="issued")
+                    await db.commit()
+                except Exception as e:
+                    await db.rollback()
+                    # Log error pero no fallar el webhook
+                    print(f"Error generando tickets para orden {order.id}: {e}")
+                    # Marcar orden como paid aunque falle la generación de tickets
+                    order.status = "completed"
+                    await db.commit()
+            else:
+                # Para transferencias bancarias, solo actualizar el estado de la orden
+                # Los tickets ya fueron creados con status "pending"
                 await db.commit()
             
             return True
@@ -264,33 +440,49 @@ class PurchaseService:
     async def _generate_tickets(
         self,
         db: AsyncSession,
-        order: Order
+        order: Order,
+        attendees_data: Optional[List[Dict]] = None,
+        ticket_status: str = "issued"
     ) -> List[Ticket]:
         """
-        Generar tickets después de pago exitoso
+        Generar tickets después de pago exitoso o para transferencias bancarias
         
         Args:
             db: Sesión de base de datos
-            order: Orden completada
+            order: Orden
+            attendees_data: Datos de attendees (opcional, si no se proporciona se busca en cache)
+            ticket_status: Estado inicial de los tickets ("issued" para Mercado Pago, "pending" para transferencias)
         
         Returns:
             Lista de tickets generados
         """
-        # Recuperar attendees del cache usando idempotency_key
-        attendees_data = None
-        if order.idempotency_key:
-            attendees_cache_key = f"purchase:attendees:{order.idempotency_key}"
-            attendees_data = await cache_get(attendees_cache_key)
-        
+        # Si no se proporcionan attendees_data, recuperarlos del cache usando idempotency_key
         if not attendees_data:
-            raise ValueError(f"No se encontraron datos de attendees para orden {order.id}")
+            if order.idempotency_key:
+                attendees_cache_key = f"purchase:attendees:{order.idempotency_key}"
+                attendees_data = await cache_get(attendees_cache_key)
+            
+            if not attendees_data:
+                raise ValueError(f"No se encontraron datos de attendees para orden {order.id}")
         
         tickets = []
         commission_total = 0.0
         attendee_index = 0  # Índice global para rastrear qué attendee corresponde a cada ticket
         
+        # Obtener order items - si order.order_items está vacío, cargarlos explícitamente
+        if not order.order_items:
+            # Cargar order_items explícitamente desde la base de datos
+            stmt_order_items = select(OrderItem).where(OrderItem.order_id == order.id)
+            result_order_items = await db.execute(stmt_order_items)
+            order_items_list = result_order_items.scalars().all()
+        else:
+            order_items_list = list(order.order_items)
+        
+        if not order_items_list:
+            raise ValueError(f"No se encontraron order_items para la orden {order.id}")
+        
         # Obtener order items
-        for order_item in order.order_items:
+        for order_item in order_items_list:
             # Obtener tipo de ticket
             stmt_ticket_type = select(TicketType).where(TicketType.id == order_item.ticket_type_id)
             result_ticket_type = await db.execute(stmt_ticket_type)
@@ -334,8 +526,8 @@ class PurchaseService:
                     holder_document_number=attendee_data.get("document_number"),
                     is_child=attendee_data.get("is_child", False),
                     qr_signature=qr_signature,
-                    status="issued",
-                    issued_at=datetime.utcnow()
+                    status=ticket_status,  # "issued" para Mercado Pago, "pending" para transferencias
+                    issued_at=datetime.utcnow() if ticket_status == "issued" else datetime.utcnow()  # Siempre establecer issued_at
                 )
                 db.add(ticket)
                 await db.flush()
@@ -389,10 +581,20 @@ class PurchaseService:
         edad = 0
         fecha_nacimiento = None
         if child_details_data.get("birth_date"):
-            if isinstance(child_details_data["birth_date"], str):
-                fecha_nacimiento = datetime.fromisoformat(child_details_data["birth_date"]).date()
-            else:
-                fecha_nacimiento = child_details_data["birth_date"]
+            try:
+                if isinstance(child_details_data["birth_date"], str):
+                    # Intentar parsear como ISO format
+                    if "T" in child_details_data["birth_date"]:
+                        fecha_nacimiento = datetime.fromisoformat(child_details_data["birth_date"].replace("Z", "+00:00")).date()
+                    else:
+                        fecha_nacimiento = datetime.fromisoformat(child_details_data["birth_date"]).date()
+                elif isinstance(child_details_data["birth_date"], datetime):
+                    fecha_nacimiento = child_details_data["birth_date"].date()
+                elif isinstance(child_details_data["birth_date"], date):
+                    fecha_nacimiento = child_details_data["birth_date"]
+            except (ValueError, AttributeError) as e:
+                print(f"Error parseando birth_date: {e}, valor: {child_details_data.get('birth_date')}")
+                fecha_nacimiento = date.today()  # Usar fecha por defecto si falla
             
             # Calcular edad
             today = date.today()
@@ -429,7 +631,16 @@ class PurchaseService:
         
         # Crear medicamentos si existen
         if child_details_data.get("medications"):
-            for med_data in child_details_data["medications"]:
+            medications = child_details_data["medications"]
+            # Asegurar que medications es una lista
+            if not isinstance(medications, list):
+                medications = []
+            
+            for med_data in medications:
+                # Asegurar que med_data es un diccionario
+                if not isinstance(med_data, dict):
+                    continue
+                    
                 medication = TicketChildMedication(
                     id=uuid.uuid4(),
                     ticket_child_id=child_detail.id,

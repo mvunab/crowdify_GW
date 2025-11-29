@@ -29,12 +29,15 @@ class PurchaseRequest(BaseModel):
     attendees: List[AttendeeData]
     selected_services: Optional[Dict[str, int]] = None  # {serviceId: quantity}
     idempotency_key: Optional[str] = None
+    payment_method: Optional[str] = None  # 'mercadopago' | 'bank_transfer'
+    receipt_url: Optional[str] = None  # URL del comprobante de transferencia (opcional)
 
 
 class PurchaseResponse(BaseModel):
     order_id: str
-    payment_link: str
+    payment_link: Optional[str] = None  # Opcional - solo para Mercado Pago
     status: str  # pending, completed, failed
+    payment_method: Optional[str] = None  # 'mercadopago' | 'bank_transfer'
 
 
 class OrderStatusResponse(BaseModel):

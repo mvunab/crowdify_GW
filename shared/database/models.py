@@ -120,6 +120,7 @@ class Order(Base):
     status = Column(String, nullable=False, server_default="pending")  # pending, processing, completed, cancelled, refunded
     payment_provider = Column(String, nullable=True)
     payment_reference = Column(String, nullable=True)
+    receipt_url = Column(String, nullable=True)  # URL del comprobante de transferencia bancaria
     idempotency_key = Column(String, unique=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -166,7 +167,7 @@ class Ticket(Base):
     is_child = Column(Boolean, nullable=True, server_default="false")
     qr_signature = Column(String, unique=True, index=True, nullable=False)
     pdf_object_key = Column(String, nullable=True)
-    status = Column(String, nullable=False, server_default="issued")  # issued, validated, used, cancelled
+    status = Column(String, nullable=False, server_default="issued")  # issued, validated, used, cancelled, pending
     issued_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     validated_at = Column(DateTime(timezone=True), nullable=True)  # Cuando fue validado
     used_at = Column(DateTime(timezone=True), nullable=True)  # Cuando fue usado
