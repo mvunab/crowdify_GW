@@ -215,8 +215,9 @@ class AdminOrdersService:
         try:
             # Ejecutar la función stored procedure
             # La función retorna JSON y maneja la transacción internamente
+            # Usar CAST en lugar de :: para evitar problemas de sintaxis con parámetros
             proc_result = await db.execute(
-                text("SELECT confirm_pending_order(:order_uuid::uuid)"),
+                text("SELECT confirm_pending_order(CAST(:order_uuid AS uuid))"),
                 {"order_uuid": str(order_uuid)}
             )
             result_data = proc_result.scalar()
