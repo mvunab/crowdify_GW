@@ -29,6 +29,8 @@ async def create_purchase(
     NOTA: user_id es opcional ahora. Si se proporciona, debe coincidir con el usuario autenticado.
     Si no se proporciona, la compra es anónima (solo para usuarios comunes).
     """
+    print(f"[DEBUG ROUTE] Request recibido - payment_method: {request.payment_method}")
+    print(f"[DEBUG ROUTE] Request completo: {request.dict()}")
     # Si se proporciona user_id, debe coincidir con el usuario autenticado
     if request.user_id:
         if not current_user:
@@ -57,7 +59,12 @@ async def create_purchase(
     
     try:
         result = await service.create_purchase(db, request)
-        return PurchaseResponse(**result)
+        print(f"[DEBUG ROUTE] Result del servicio: {result}")
+        print(f"[DEBUG ROUTE] payment_link en result: {result.get('payment_link')}")
+        response = PurchaseResponse(**result)
+        print(f"[DEBUG ROUTE] PurchaseResponse creado: {response}")
+        print(f"[DEBUG ROUTE] payment_link en response: {response.payment_link}")
+        return response
     except ValueError as e:
         import traceback
         print(f"ValueError en create_purchase: {str(e)}")
@@ -90,7 +97,30 @@ async def mercado_pago_webhook(
     service = PurchaseService()
     
     try:
+        # Obtener headers necesarios para verificación
+        signature = request.headers.get("x-signature")
+        request_id = request.headers.get("x-request-id")
+        
+        # Obtener query params
+        query_params = dict(request.query_params)
+        
+        # Obtener body
         data = await request.json()
+        
+        # Verificar firma del webhook
+        mercado_pago_service = service.mercado_pago_service
+        is_valid = mercado_pago_service.verify_webhook(
+            data=data,
+            signature=signature,
+            request_id=request_id,
+            query_params=query_params
+        )
+        
+        if not is_valid:
+            print("⚠️  Webhook con firma inválida, pero procesando de todas formas (modo desarrollo)")
+            # En producción, podrías retornar 401 aquí
+        
+        # Procesar webhook
         success = await service.process_payment_webhook(db, data)
         
         if success:
@@ -100,6 +130,8 @@ async def mercado_pago_webhook(
     except Exception as e:
         # Log error pero retornar 200 para que Mercado Pago no reintente inmediatamente
         print(f"Error procesando webhook: {e}")
+        import traceback
+        traceback.print_exc()
         return {"status": "error", "message": str(e)}
 
 

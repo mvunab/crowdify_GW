@@ -41,61 +41,158 @@ class PurchaseService:
         Returns:
             dict con order_id, payment_link, status
         """
-        # Generar o usar idempotency_key
-        idempotency_key = request.idempotency_key or self._generate_idempotency_key(request)
+        # Determinar método de pago PRIMERO
+        payment_method = request.payment_method or "mercadopago"
+        is_bank_transfer = payment_method == "bank_transfer"
+        
+        print(f"[DEBUG SERVICE] Payment method recibido: {payment_method}")
+        print(f"[DEBUG SERVICE] Is bank transfer: {is_bank_transfer}")
+        
+        # Generar idempotency_key base (sin payment_method)
+        base_idempotency_key = request.idempotency_key or self._generate_idempotency_key(request)
+        
+        # Incluir payment_method en el idempotency_key para que sean únicos por método de pago
+        # Esto evita conflictos cuando el mismo usuario intenta comprar con diferentes métodos
+        import hashlib
+        idempotency_key = hashlib.sha256(f"{base_idempotency_key}:{payment_method}".encode()).hexdigest()
+        
+        print(f"[DEBUG SERVICE] Base idempotency_key: {base_idempotency_key}")
+        print(f"[DEBUG SERVICE] Final idempotency_key (con payment_method): {idempotency_key}")
+        
+        # Incluir payment_method en el cache key para diferenciar por método de pago
+        cache_key = f"purchase:idempotency:{idempotency_key}"
         
         # Verificar idempotencia en cache
-        cache_key = f"purchase:idempotency:{idempotency_key}"
         cached = await cache_get(cache_key)
         if cached:
+            print(f"[DEBUG SERVICE] Orden encontrada en cache: {cached}")
             return cached
         
-        # Verificar en la base de datos si existe una orden con ese idempotency_key
-        stmt_existing = select(Order).where(Order.idempotency_key == idempotency_key)
+        # Verificar en la base de datos si existe una orden con ese idempotency_key Y mismo payment_method
+        stmt_existing = select(Order).where(
+            Order.idempotency_key == idempotency_key,
+            Order.payment_provider == payment_method
+        )
         result_existing = await db.execute(stmt_existing)
         existing_order = result_existing.scalar_one_or_none()
         
         if existing_order:
-            # Si es transferencia bancaria y no tiene tickets, crearlos
-            if existing_order.payment_provider == "bank_transfer":
-                # Verificar si tiene tickets
-                from sqlalchemy import func
-                stmt_tickets_count = select(func.count(Ticket.id)).join(
-                    OrderItem, Ticket.order_item_id == OrderItem.id
-                ).where(OrderItem.order_id == existing_order.id)
-                result_tickets_count = await db.execute(stmt_tickets_count)
-                tickets_count = result_tickets_count.scalar() or 0
-                
-                if tickets_count == 0:
-                    # No tiene tickets, crearlos ahora
-                    await db.refresh(existing_order, ["order_items"])
-                    if existing_order.order_items:
-                        # Preparar attendees_data para esta orden
-                        attendees_data_for_existing = [
-                            {
-                                "name": att.name,
-                                "email": att.email,
-                                "document_type": att.document_type,
-                                "document_number": att.document_number,
-                                "is_child": att.is_child,
-                                "child_details": att.child_details.dict() if att.child_details and hasattr(att.child_details, 'dict') else (att.child_details if att.child_details else None)
-                            }
-                            for att in request.attendees
-                        ]
-                        
-                        tickets = await self._generate_tickets(
-                            db, existing_order, attendees_data_for_existing, ticket_status="pending"
-                        )
-                        await db.commit()
-                        await db.refresh(existing_order)
+            print(f"[DEBUG SERVICE] Orden existente encontrada: {existing_order.id}")
+            print(f"[DEBUG SERVICE] Payment provider de orden existente: {existing_order.payment_provider}")
             
-            # Retornar la orden existente
-            return {
-                "order_id": str(existing_order.id),
-                "payment_link": None if existing_order.payment_provider == "bank_transfer" else None,
-                "status": existing_order.status,
-                "payment_method": existing_order.payment_provider or "mercadopago"
-            }
+            # Si el método de pago del request NO coincide con el de la orden existente,
+            # crear una nueva orden (no usar idempotencia en este caso)
+            if existing_order.payment_provider != payment_method:
+                print(f"[DEBUG SERVICE] Método de pago diferente. Creando nueva orden...")
+                # Continuar con la creación de una nueva orden
+                existing_order = None
+            else:
+                # Si es transferencia bancaria y no tiene tickets, crearlos
+                if existing_order.payment_provider == "bank_transfer":
+                    # Verificar si tiene tickets
+                    from sqlalchemy import func
+                    stmt_tickets_count = select(func.count(Ticket.id)).join(
+                        OrderItem, Ticket.order_item_id == OrderItem.id
+                    ).where(OrderItem.order_id == existing_order.id)
+                    result_tickets_count = await db.execute(stmt_tickets_count)
+                    tickets_count = result_tickets_count.scalar() or 0
+                    
+                    if tickets_count == 0:
+                        # No tiene tickets, crearlos ahora
+                        await db.refresh(existing_order, ["order_items"])
+                        if existing_order.order_items:
+                            # Preparar attendees_data para esta orden
+                            attendees_data_for_existing = [
+                                {
+                                    "name": att.name,
+                                    "email": att.email,
+                                    "document_type": att.document_type,
+                                    "document_number": att.document_number,
+                                    "is_child": att.is_child,
+                                    "child_details": att.child_details.dict() if att.child_details and hasattr(att.child_details, 'dict') else (att.child_details if att.child_details else None)
+                                }
+                                for att in request.attendees
+                            ]
+                            
+                            tickets = await self._generate_tickets(
+                                db, existing_order, attendees_data_for_existing, ticket_status="pending"
+                            )
+                            await db.commit()
+                            await db.refresh(existing_order)
+                
+                # Retornar la orden existente (solo si el método de pago coincide)
+                payment_link = None
+                if existing_order.payment_provider == "mercadopago":
+                    if existing_order.payment_reference:
+                        # Si tiene payment_reference, obtener el init_point de la preferencia
+                        try:
+                            preference = self.mercado_pago_service.get_preference(existing_order.payment_reference)
+                            if preference:
+                                # En sandbox, usar sandbox_init_point si está disponible
+                                environment = self.mercado_pago_service.environment
+                                if environment == "sandbox":
+                                    payment_link = preference.get("sandbox_init_point") or preference.get("init_point")
+                                else:
+                                    payment_link = preference.get("init_point")
+                        except Exception as e:
+                            print(f"[WARNING] No se pudo obtener payment_link de preferencia existente: {str(e)}")
+                            # Si falla, intentar crear una nueva preferencia
+                            payment_link = None
+                    
+                    # Si no tiene payment_reference o no se pudo obtener el link, crear nueva preferencia
+                    if not payment_link:
+                        try:
+                            # Obtener información de la orden para crear la preferencia
+                            await db.refresh(existing_order, ["order_items"])
+                            
+                            # Construir items desde order_items
+                            items = []
+                            for order_item in existing_order.order_items:
+                                items.append({
+                                    "title": f"Ticket - {order_item.ticket_type.name if hasattr(order_item, 'ticket_type') and order_item.ticket_type else 'Ticket'}",
+                                    "description": f"{order_item.quantity} ticket(s)",
+                                    "quantity": order_item.quantity,
+                                    "unit_price": float(order_item.unit_price)
+                                })
+                            
+                            # Obtener información del primer attendee si está disponible
+                            payer_email = None
+                            payer_name = None
+                            payer_identification = None
+                            if request.attendees and len(request.attendees) > 0:
+                                first_attendee = request.attendees[0]
+                                payer_email = first_attendee.email
+                                payer_name = first_attendee.name
+                                if first_attendee.document_type and first_attendee.document_number:
+                                    payer_identification = {
+                                        "type": first_attendee.document_type,
+                                        "number": first_attendee.document_number
+                                    }
+                            
+                            # Crear nueva preferencia
+                            preference = self.mercado_pago_service.create_preference(
+                                order_id=str(existing_order.id),
+                                currency="CLP",
+                                items=items,
+                                payer_email=payer_email,
+                                payer_name=payer_name,
+                                payer_identification=payer_identification
+                            )
+                            
+                            existing_order.payment_reference = preference["preference_id"]
+                            payment_link = preference["payment_link"]
+                            await db.commit()
+                        except Exception as e:
+                            print(f"[ERROR] Error creando preferencia para orden existente: {str(e)}")
+                            import traceback
+                            print(traceback.format_exc())
+                
+                return {
+                    "order_id": str(existing_order.id),
+                    "payment_link": payment_link,
+                    "status": existing_order.status,
+                    "payment_method": existing_order.payment_provider or "mercadopago"
+                }
         
         # Verificar que el evento existe
         stmt_event = select(Event).where(Event.id == request.event_id)
@@ -152,9 +249,7 @@ class PurchaseService:
             if not attendee.email:
                 raise ValueError(f"Todos los asistentes deben tener un correo electrónico. Falta email para: {attendee.name}")
         
-        # Determinar método de pago
-        payment_method = request.payment_method or "mercadopago"
-        is_bank_transfer = payment_method == "bank_transfer"
+        # El método de pago ya se determinó arriba
         
         # Crear orden - user_id es opcional ahora
         order = Order(
@@ -308,19 +403,81 @@ class PurchaseService:
         # Si es Mercado Pago, crear preferencia de pago
         else:
             try:
+                print(f"[DEBUG] Creando preferencia de Mercado Pago para orden {order.id}")
+                print(f"[DEBUG] Payment method recibido: {payment_method}")
+                
+                # Construir items para la preferencia (tickets + servicios)
+                items = []
+                
+                # Item para tickets
+                ticket_type_name = ticket_type.name if hasattr(ticket_type, 'name') else "Ticket"
+                items.append({
+                    "title": f"{ticket_type_name} - {event.name}",
+                    "description": f"{total_quantity} ticket(s) para {event.name}",
+                    "quantity": total_quantity,
+                    "unit_price": float(ticket_type.price)
+                })
+                
+                # Items para servicios adicionales
+                if request.selected_services:
+                    # Recargar servicios para obtener nombres
+                    stmt_services = select(EventService).where(
+                        EventService.event_id == request.event_id,
+                        EventService.id.in_(list(request.selected_services.keys()))
+                    )
+                    result_services = await db.execute(stmt_services)
+                    services = result_services.scalars().all()
+                    
+                    for service in services:
+                        quantity = request.selected_services.get(str(service.id), 0)
+                        if quantity > 0:
+                            items.append({
+                                "title": service.name or "Servicio adicional",
+                                "description": f"{service.name} - {event.name}",
+                                "quantity": quantity,
+                                "unit_price": float(service.price)
+                            })
+                
+                print(f"[DEBUG] Items para preferencia: {items}")
+                
+                # Obtener información del primer attendee para la preferencia
+                payer_email = None
+                payer_name = None
+                payer_identification = None
+                if request.attendees and len(request.attendees) > 0:
+                    first_attendee = request.attendees[0]
+                    payer_email = first_attendee.email
+                    payer_name = first_attendee.name
+                    # Construir identificación si está disponible
+                    if first_attendee.document_type and first_attendee.document_number:
+                        payer_identification = {
+                            "type": first_attendee.document_type,
+                            "number": first_attendee.document_number
+                        }
+                
+                # Crear preferencia con múltiples items
                 preference = self.mercado_pago_service.create_preference(
                     order_id=str(order.id),
-                    title=f"Tickets - {event.name}",
-                    total_amount=total,
                     currency="CLP",
-                    description=f"{total_quantity} ticket(s) para {event.name}"
+                    items=items,
+                    payer_email=payer_email,
+                    payer_name=payer_name,
+                    payer_identification=payer_identification
                 )
+                
+                print(f"[DEBUG] Preferencia creada: {preference}")
                 
                 order.payment_reference = preference["preference_id"]
                 payment_link = preference["payment_link"]
                 
+                print(f"[DEBUG] Payment link obtenido: {payment_link}")
+                
             except Exception as e:
                 # Si falla la creación de preferencia, liberar capacidad y rollback
+                import traceback
+                error_trace = traceback.format_exc()
+                print(f"[ERROR] Error creando preferencia de pago: {str(e)}")
+                print(f"[ERROR] Traceback: {error_trace}")
                 await self.inventory_service.release_capacity(
                     db, request.event_id, total_quantity, "payment_creation_failed"
                 )
@@ -336,6 +493,8 @@ class PurchaseService:
                 "status": "pending",
                 "payment_method": "mercadopago"
             }
+            
+            print(f"[DEBUG] Response final: {response}")
             
             # Guardar en cache para idempotencia
             await cache_set(cache_key, response, expire=3600)
@@ -353,15 +512,48 @@ class PurchaseService:
         Returns:
             True si se procesó correctamente
         """
-        payment_id = payment_data.get("data", {}).get("id")
-        if not payment_id:
+        # Obtener datos de la notificación
+        notification_data = payment_data.get("data", {})
+        notification_type = payment_data.get("type")
+        resource_id = notification_data.get("id")
+        
+        if not resource_id:
+            print("⚠️  Webhook sin ID de recurso")
             return False
         
-        # Obtener información del pago
-        payment_info = self.mercado_pago_service.verify_payment(payment_id)
+        # Para notificaciones de tipo "order", usar external_reference directamente
+        external_reference = None
+        payment_status = None
         
-        external_reference = payment_info.get("external_reference")
+        if notification_type == "order":
+            # Las notificaciones de order ya incluyen external_reference
+            external_reference = notification_data.get("external_reference")
+            payment_status = notification_data.get("status")
+            
+            # Si no hay external_reference en la notificación, intentar obtenerlo del order
+            if not external_reference:
+                try:
+                    order_info = self.mercado_pago_service.verify_order(resource_id)
+                    external_reference = order_info.get("external_reference")
+                    payment_status = order_info.get("status")
+                except Exception as e:
+                    print(f"⚠️  No se pudo obtener order {resource_id} (puede ser simulación): {e}")
+                    return False
+        else:
+            # Para notificaciones de tipo "payment", obtener del pago
+            try:
+                payment_info = self.mercado_pago_service.verify_payment(resource_id)
+                external_reference = payment_info.get("external_reference")
+                payment_status = payment_info.get("status")
+            except Exception as e:
+                print(f"⚠️  No se pudo obtener pago {resource_id} (puede ser simulación): {e}")
+                # Intentar obtener external_reference de la notificación directamente
+                external_reference = notification_data.get("external_reference")
+                if not external_reference:
+                    return False
+        
         if not external_reference:
+            print("⚠️  Webhook sin external_reference")
             return False
         
         # Buscar orden
@@ -370,11 +562,20 @@ class PurchaseService:
         order = result.scalar_one_or_none()
         
         if not order:
+            print(f"⚠️  Orden {external_reference} no encontrada (puede ser simulación)")
             return False
         
-        # Actualizar estado según el pago
-        payment_status = payment_info.get("status")
+        # Mapear estados de order a estados de pago
+        # Para notificaciones de tipo "order", el status puede ser "processed", "pending", etc.
+        # Para notificaciones de tipo "payment", el status es "approved", "pending", etc.
+        if notification_type == "order":
+            # Mapear estados de order a estados de pago
+            if payment_status == "processed":
+                payment_status = "approved"
+            elif payment_status in ["expired", "failed", "canceled"]:
+                payment_status = "cancelled"
         
+        # Actualizar estado según el pago
         if payment_status == "approved":
             order.status = "completed"  # Cambiar a "completed" según el modelo
             order.paid_at = datetime.utcnow()
