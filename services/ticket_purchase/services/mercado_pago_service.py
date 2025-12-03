@@ -18,12 +18,38 @@ class MercadoPagoService:
                 "Consulta docs/MERCADOPAGO_SETUP.md para más información."
             )
         
+        self.access_token = access_token
         self.sdk = mercadopago.SDK(access_token)
         self.webhook_secret = settings.MERCADOPAGO_WEBHOOK_SECRET or os.getenv("MERCADOPAGO_WEBHOOK_SECRET")
         self.environment = settings.MERCADOPAGO_ENVIRONMENT or os.getenv("MERCADOPAGO_ENVIRONMENT", "sandbox")
         self.base_url = settings.APP_BASE_URL or os.getenv("APP_BASE_URL", "http://localhost:5173")
         # URL para webhooks: usar ngrok si está disponible, sino usar localhost
         self.webhook_base_url = settings.NGROK_URL or os.getenv("NGROK_URL") or self.base_url.replace(':5173', ':8000')
+        
+        # Validar token al inicializar (opcional, puede ser costoso en producción)
+        # Comentado por defecto para no hacer llamadas innecesarias
+        # self._validate_token()
+    
+    def _validate_token(self) -> bool:
+        """
+        Valida que el token de Mercado Pago sea válido
+        Returns True si es válido, False si no
+        """
+        try:
+            user_result = self.sdk.user().get()
+            if user_result["status"] == 200:
+                return True
+            else:
+                error_msg = user_result.get('message', 'Error desconocido')
+                error_status = user_result.get('status', 'N/A')
+                print(f"[ERROR] Token inválido: {error_msg} (Status: {error_status})")
+                if error_status == 401:
+                    print("[ERROR] El token está expirado o es inválido. Obtén uno nuevo desde:")
+                    print("        https://www.mercadopago.com/developers/panel/app")
+                return False
+        except Exception as e:
+            print(f"[ERROR] Error validando token: {str(e)}")
+            return False
     
     def create_preference(
         self,
@@ -151,11 +177,38 @@ class MercadoPagoService:
             preference_data["auto_return"] = "approved"
         
         # Crear preferencia
-        preference_response = self.sdk.preference().create(preference_data)
+        try:
+            preference_response = self.sdk.preference().create(preference_data)
+        except Exception as e:
+            # Capturar errores de conexión o del SDK
+            error_msg = f"Error al comunicarse con Mercado Pago: {str(e)}"
+            print(f"[ERROR] {error_msg}")
+            print(f"[ERROR] Token usado: {self.access_token[:30]}...{self.access_token[-20:]}")
+            raise Exception(error_msg)
         
         if preference_response["status"] != 201:
             error_message = preference_response.get('message', 'Error desconocido')
+            error_status = preference_response.get('status', 'N/A')
             error_response = preference_response.get('response', {})
+            
+            # Log detallado del error
+            print(f"[ERROR] Error creando preferencia de Mercado Pago")
+            print(f"[ERROR] Status HTTP: {error_status}")
+            print(f"[ERROR] Mensaje: {error_message}")
+            print(f"[ERROR] Token usado: {self.access_token[:30]}...{self.access_token[-20:]}")
+            
+            # Detectar errores específicos de token
+            if error_status == 401:
+                error_message = (
+                    f"Token de Mercado Pago inválido o expirado (401 Unauthorized). "
+                    f"Por favor, verifica tu MERCADOPAGO_ACCESS_TOKEN en el archivo .env. "
+                    f"Obtén un nuevo token desde: https://www.mercadopago.com/developers/panel/app"
+                )
+            elif error_status == 403:
+                error_message = (
+                    f"Token sin permisos suficientes (403 Forbidden). "
+                    f"Verifica los permisos de tu aplicación en Mercado Pago."
+                )
             
             # Intentar obtener más detalles del error
             if isinstance(error_response, dict):
