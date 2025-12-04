@@ -163,3 +163,6 @@ Si el problema persiste después de seguir estos pasos:
 - [Panel de Desarrolladores](https://www.mercadopago.com/developers/panel/app)
 - [Guía de Setup](MERCADOPAGO_SETUP.md)
 
+
+
+

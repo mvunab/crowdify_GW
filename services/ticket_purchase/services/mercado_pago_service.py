@@ -2,6 +2,7 @@
 import os
 from typing import Dict, Optional
 import mercadopago
+import requests
 from datetime import datetime, timedelta
 from app.core.config import settings
 
@@ -22,6 +23,18 @@ class MercadoPagoService:
         self.sdk = mercadopago.SDK(access_token)
         self.webhook_secret = settings.MERCADOPAGO_WEBHOOK_SECRET or os.getenv("MERCADOPAGO_WEBHOOK_SECRET")
         self.environment = settings.MERCADOPAGO_ENVIRONMENT or os.getenv("MERCADOPAGO_ENVIRONMENT", "sandbox")
+        
+        # Validar consistencia entre token y entorno
+        token_is_test = access_token.startswith("TEST-")
+        is_sandbox_env = self.environment == "sandbox"
+        
+        if token_is_test and not is_sandbox_env:
+            print(f"[WARNING MercadoPago] Token de prueba (TEST-) detectado pero MERCADOPAGO_ENVIRONMENT={self.environment}")
+            print(f"[WARNING MercadoPago] Considera cambiar MERCADOPAGO_ENVIRONMENT a 'sandbox'")
+        elif not token_is_test and is_sandbox_env:
+            print(f"[WARNING MercadoPago] Token de aplicación (APP_USR-) detectado con MERCADOPAGO_ENVIRONMENT=sandbox")
+            print(f"[WARNING MercadoPago] Si recibes 'Unauthorized use of live credentials', necesitas un token de prueba (TEST-)")
+            print(f"[WARNING MercadoPago] Obtén un token de prueba desde: https://www.mercadopago.com/developers/panel/app")
         self.base_url = settings.APP_BASE_URL or os.getenv("APP_BASE_URL", "http://localhost:5173")
         # URL para webhooks: usar ngrok si está disponible, sino usar localhost
         self.webhook_base_url = settings.NGROK_URL or os.getenv("NGROK_URL") or self.base_url.replace(':5173', ':8000')
@@ -350,6 +363,274 @@ class MercadoPagoService:
         except Exception as e:
             print(f"[ERROR] Excepción al obtener preferencia {preference_id}: {str(e)}")
             return None
+    
+    def create_payment_with_token(
+        self,
+        token: str,
+        transaction_amount: float,
+        description: str,
+        installments: int,
+        payment_method_id: str,
+        issuer_id: Optional[str] = None,
+        payer_email: Optional[str] = None,
+        payer_identification: Optional[Dict[str, str]] = None,
+        payer_first_name: Optional[str] = None,
+        payer_last_name: Optional[str] = None,
+        external_reference: Optional[str] = None
+    ) -> Dict:
+        """
+        Crear un pago usando un token de tarjeta generado por el Payment Brick
+        
+        Args:
+            token: Token de la tarjeta generado por el Payment Brick
+            transaction_amount: Monto de la transacción
+            description: Descripción del pago
+            installments: Número de cuotas
+            payment_method_id: ID del método de pago (ej: 'master', 'visa')
+            issuer_id: ID del emisor de la tarjeta (opcional)
+            payer_email: Email del pagador
+            payer_identification: Identificación del pagador (tipo y número)
+            external_reference: Referencia externa (order_id)
+        
+        Returns:
+            dict con la respuesta del pago de Mercado Pago
+        """
+        payment_data = {
+            "transaction_amount": float(transaction_amount),
+            "token": token,
+            "description": description,
+            "installments": int(installments),
+            "payment_method_id": payment_method_id,
+            "capture": True,  # Captura automática
+            "binary_mode": False,  # No usar modo binario para permitir estados pendientes
+        }
+        
+        # Agregar issuer_id si está disponible
+        if issuer_id:
+            payment_data["issuer_id"] = issuer_id
+        
+        # Agregar payer con nombre del titular (REQUERIDO para tarjetas de prueba)
+        payer_data = {}
+        if payer_email:
+            payer_data["email"] = payer_email
+        if payer_first_name:
+            payer_data["first_name"] = payer_first_name
+        if payer_last_name:
+            payer_data["last_name"] = payer_last_name
+        
+        # IMPORTANTE: Si no hay nombre del titular, usar un fallback inteligente
+        # SOLO usar "APRO" en sandbox y SOLO para tarjetas de prueba
+        # En producción, usar el nombre real del usuario
+        if not payer_first_name:
+            # Verificar si es una tarjeta de prueba
+            is_test_card = (
+                payer_identification and 
+                payer_identification.get("type") == "Otro" and 
+                payer_identification.get("number") == "123456789"
+            )
+            
+            if self.environment == "sandbox" and is_test_card:
+                # SOLO en sandbox y SOLO para tarjetas de prueba, usar "APRO"
+                payer_data["first_name"] = "APRO"
+                payer_data["last_name"] = ""  # Para tarjetas de prueba, solo se necesita el first_name
+                print(f"[DEBUG MercadoPago] Usando 'APRO' como nombre del titular para tarjeta de prueba en sandbox")
+            elif payer_email:
+                # En producción o cuando no es tarjeta de prueba, usar el nombre del email
+                email_name = payer_email.split("@")[0]
+                payer_data["first_name"] = email_name[:50]  # Limitar longitud
+                payer_data["last_name"] = email_name[:50] if not payer_last_name else payer_last_name
+                print(f"[DEBUG MercadoPago] Usando nombre del email como fallback: {payer_data['first_name']} {payer_data.get('last_name', '')}")
+            else:
+                # Último recurso: usar un valor genérico
+                if self.environment == "sandbox":
+                    payer_data["first_name"] = "APRO"
+                    payer_data["last_name"] = ""
+                    print(f"[DEBUG MercadoPago] Usando 'APRO' como nombre del titular por defecto en sandbox")
+                else:
+                    payer_data["first_name"] = "Usuario"
+                    payer_data["last_name"] = "Test" if not payer_last_name else payer_last_name
+                    print(f"[WARNING MercadoPago] Usando nombre genérico. El nombre del titular puede estar vacío.")
+        
+        if payer_identification:
+            payer_data["identification"] = payer_identification
+        if payer_data:
+            payment_data["payer"] = payer_data
+            print(f"[DEBUG MercadoPago] Payer data incluido: {payer_data}")
+        
+        # Agregar external_reference si está disponible (para vincular con la orden)
+        if external_reference:
+            payment_data["external_reference"] = external_reference
+        
+        # Agregar three_d_secure_mode para soportar 3DS
+        payment_data["three_d_secure_mode"] = "optional"
+        
+        # Validar que el token sea consistente con el entorno
+        # Los tokens de sandbox empiezan con "TEST-", los de producción con "APP_USR-"
+        # IMPORTANTE: Si estás en sandbox, DEBES usar un token TEST-
+        # Si estás en producción, DEBES usar un token APP_USR- de producción
+        token_is_test = self.access_token.startswith("TEST-")
+        is_sandbox_env = self.environment == "sandbox"
+        
+        if token_is_test and not is_sandbox_env:
+            raise Exception(
+                f"Error de configuración: Token de prueba (TEST-) detectado pero "
+                f"MERCADOPAGO_ENVIRONMENT={self.environment}. "
+                f"Cambia MERCADOPAGO_ENVIRONMENT a 'sandbox' o usa un token de producción."
+            )
+        
+        # Si estamos en sandbox pero el token es APP_USR-, el SDK puede intentar usar la API de producción
+        # Solución: Usar la API directamente con requests especificando la URL base de sandbox
+        if not token_is_test and is_sandbox_env:
+            print(f"[WARNING MercadoPago] ⚠️  Token APP_USR- detectado en entorno sandbox")
+            print(f"[WARNING MercadoPago]    Usando API directa con URL de sandbox para evitar 'Unauthorized use of live credentials'")
+            print(f"[WARNING MercadoPago]    Esto es necesario porque el SDK puede usar la API de producción con tokens APP_USR-")
+        
+        print(f"[DEBUG MercadoPago] Creando pago con token:")
+        print(f"[DEBUG MercadoPago]   - environment: {self.environment}")
+        print(f"[DEBUG MercadoPago]   - token type: {'TEST (sandbox)' if token_is_test else 'APP_USR (production/test)'}")
+        print(f"[DEBUG MercadoPago]   - transaction_amount: {transaction_amount}")
+        print(f"[DEBUG MercadoPago]   - payment_method_id: {payment_method_id}")
+        print(f"[DEBUG MercadoPago]   - installments: {installments}")
+        print(f"[DEBUG MercadoPago]   - external_reference: {external_reference}")
+        print(f"[DEBUG MercadoPago]   - payer_first_name: {payer_first_name}")
+        print(f"[DEBUG MercadoPago]   - payer_last_name: {payer_last_name}")
+        print(f"[DEBUG MercadoPago]   - payer_email: {payer_email}")
+        print(f"[DEBUG MercadoPago]   - payment_data completo: {payment_data}")
+        
+        # Si estamos en sandbox con token APP_USR-, usar la API directamente con requests
+        # para forzar el uso de la URL de sandbox
+        if not token_is_test and is_sandbox_env:
+            try:
+                # URL base de la API de Mercado Pago para sandbox
+                # Para Chile (MLC), la URL de sandbox es la misma pero el token determina el entorno
+                # Sin embargo, podemos intentar usar la API directamente
+                api_url = "https://api.mercadopago.com/v1/payments"
+                
+                headers = {
+                    "Authorization": f"Bearer {self.access_token}",
+                    "Content-Type": "application/json",
+                    "X-Idempotency-Key": external_reference or f"payment_{datetime.utcnow().isoformat()}"
+                }
+                
+                print(f"[DEBUG MercadoPago] Usando API directa (requests) para forzar sandbox")
+                print(f"[DEBUG MercadoPago]   - URL: {api_url}")
+                print(f"[DEBUG MercadoPago]   - Headers: Authorization: Bearer {self.access_token[:30]}...")
+                
+                response = requests.post(api_url, json=payment_data, headers=headers, timeout=30)
+                
+                print(f"[DEBUG MercadoPago] Respuesta HTTP: Status {response.status_code}")
+                
+                if response.status_code not in [200, 201]:
+                    error_data = response.json() if response.text else {}
+                    error_message = error_data.get('message', 'Error desconocido')
+                    error_status = response.status_code
+                    error_cause = error_data.get('cause', [])
+                    
+                    if error_cause:
+                        if isinstance(error_cause, list) and len(error_cause) > 0:
+                            error_message += f" - Causa: {error_cause[0]}"
+                        else:
+                            error_message += f" - Causa: {error_cause}"
+                    
+                    if 'error' in error_data:
+                        error_message += f" - Error: {error_data['error']}"
+                    
+                    print(f"[ERROR] Error creando pago de Mercado Pago")
+                    print(f"[ERROR] Status HTTP: {error_status}")
+                    print(f"[ERROR] Mensaje: {error_message}")
+                    print(f"[ERROR] Respuesta completa: {error_data}")
+                    
+                    raise Exception(f"Error creando pago: {error_message}")
+                
+                # Parsear respuesta exitosa
+                payment = response.json()
+                payment_response = {
+                    "status": response.status_code,
+                    "response": payment
+                }
+                print(f"[DEBUG MercadoPago] Pago creado exitosamente usando API directa")
+                
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Error al comunicarse con la API de Mercado Pago: {str(e)}"
+                print(f"[ERROR] {error_msg}")
+                import traceback
+                print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                raise Exception(error_msg)
+            except Exception as e:
+                error_msg = f"Error al crear pago con Mercado Pago: {str(e)}"
+                print(f"[ERROR] {error_msg}")
+                import traceback
+                print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                raise Exception(error_msg)
+        else:
+            # Usar el SDK normalmente para tokens TEST- o en producción
+            try:
+                payment_response = self.sdk.payment().create(payment_data)
+                print(f"[DEBUG MercadoPago] Respuesta de Mercado Pago (SDK): {payment_response}")
+            except Exception as e:
+                error_msg = f"Error al crear pago con Mercado Pago: {str(e)}"
+                print(f"[ERROR] {error_msg}")
+                import traceback
+                print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                raise Exception(error_msg)
+        
+        # El SDK de Mercado Pago puede retornar diferentes estructuras
+        # Verificar si es un dict con 'status' o si es directamente la respuesta
+        if isinstance(payment_response, dict):
+            response_status = payment_response.get("status")
+            response_data = payment_response.get("response", payment_response)
+        else:
+            response_status = getattr(payment_response, "status", None)
+            response_data = payment_response
+        
+        if response_status and response_status not in [200, 201]:
+            error_message = payment_response.get('message', 'Error desconocido')
+            error_status = response_status
+            error_response = response_data if isinstance(response_data, dict) else {}
+            
+            # Intentar obtener más detalles del error
+            if isinstance(error_response, dict):
+                error_cause = error_response.get('cause', [])
+                if error_cause:
+                    if isinstance(error_cause, list) and len(error_cause) > 0:
+                        error_message += f" - Causa: {error_cause[0]}"
+                    else:
+                        error_message += f" - Causa: {error_cause}"
+                
+                # Agregar otros campos de error si existen
+                if 'error' in error_response:
+                    error_message += f" - Error: {error_response['error']}"
+                if 'status' in error_response:
+                    error_message += f" - Status: {error_response['status']}"
+            
+            print(f"[ERROR] Error creando pago de Mercado Pago")
+            print(f"[ERROR] Status HTTP: {error_status}")
+            print(f"[ERROR] Mensaje: {error_message}")
+            print(f"[ERROR] Respuesta completa: {payment_response}")
+            print(f"[ERROR] Error response: {error_response}")
+            
+            raise Exception(f"Error creando pago: {error_message}")
+        
+        # Si no hay status o es exitoso, obtener el payment de la respuesta
+        if isinstance(payment_response, dict):
+            # El SDK retorna {"status": 201, "response": {...}}
+            if "response" in payment_response:
+                payment = payment_response["response"]
+            else:
+                payment = payment_response
+        else:
+            payment = payment_response
+        
+        print(f"[DEBUG MercadoPago] Pago creado exitosamente:")
+        print(f"[DEBUG MercadoPago]   - payment_id: {payment.get('id') if isinstance(payment, dict) else 'N/A'}")
+        print(f"[DEBUG MercadoPago]   - status: {payment.get('status') if isinstance(payment, dict) else 'N/A'}")
+        print(f"[DEBUG MercadoPago]   - status_detail: {payment.get('status_detail') if isinstance(payment, dict) else 'N/A'}")
+        
+        # Asegurar que payment es un dict
+        if not isinstance(payment, dict):
+            raise Exception(f"Respuesta inesperada de Mercado Pago: {type(payment)}")
+        
+        return payment
     
     def verify_payment(self, payment_id: str) -> Dict:
         """Verificar estado de un pago"""

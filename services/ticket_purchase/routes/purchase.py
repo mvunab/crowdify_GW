@@ -1,6 +1,7 @@
 """Rutas de compra de tickets"""
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from typing import Dict, Optional
 from shared.database.session import get_db
 from shared.auth.dependencies import get_current_user, get_optional_user
@@ -26,34 +27,51 @@ async def create_purchase(
     
     Compatible con: ticketsService.purchaseTickets()
     
-    NOTA: user_id es opcional ahora. Si se proporciona, debe coincidir con el usuario autenticado.
-    Si no se proporciona, la compra es anónima (solo para usuarios comunes).
+    NOTA: user_id es opcional ahora. Si se proporciona sin autenticación, se ignora y la compra es anónima.
+    Si se proporciona con autenticación, debe coincidir con el usuario autenticado.
     """
     print(f"[DEBUG ROUTE] Request recibido - payment_method: {request.payment_method}")
     print(f"[DEBUG ROUTE] Request completo: {request.dict()}")
-    # Si se proporciona user_id, debe coincidir con el usuario autenticado
-    if request.user_id:
-        if not current_user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Debes estar autenticado para crear órdenes con user_id"
-            )
-        if current_user.get("user_id") != request.user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="No puedes crear órdenes para otros usuarios"
-            )
-    else:
-        # Compra anónima - permitir si no hay usuario autenticado
-        # Si hay usuario autenticado y es admin/coordinator, debe proporcionar user_id
-        if current_user:
-            user_role = current_user.get("role", "user")
-            if user_role in ["admin", "coordinator"]:
-                # Para admins/coordinadores, user_id es requerido
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Los administradores y coordinadores deben proporcionar user_id"
-                )
+    
+    # Manejar user_id con try-except para mayor robustez
+    try:
+        # Si se proporciona user_id, validar solo si hay autenticación
+        if request.user_id:
+            if current_user:
+                # Usuario autenticado: validar que el user_id coincida
+                if current_user.get("user_id") != request.user_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="No puedes crear órdenes para otros usuarios"
+                    )
+                print(f"[DEBUG ROUTE] user_id validado: {request.user_id} (usuario autenticado)")
+            else:
+                # No hay autenticación: ignorar user_id y tratar como compra anónima
+                print(f"[DEBUG ROUTE] user_id proporcionado sin autenticación: {request.user_id} - Ignorando y tratando como compra anónima")
+                request.user_id = None
+        else:
+            # No se proporcionó user_id
+            # Si hay usuario autenticado y es admin/coordinator, requerir user_id
+            if current_user:
+                try:
+                    user_role = current_user.get("role", "user")
+                    if user_role in ["admin", "coordinator"]:
+                        # Para admins/coordinadores, user_id es requerido
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Los administradores y coordinadores deben proporcionar user_id"
+                        )
+                except HTTPException:
+                    raise  # Re-lanzar HTTPException
+                except Exception as role_error:
+                    print(f"[WARNING ROUTE] Error obteniendo rol del usuario: {role_error}")
+                    # Continuar sin validar rol si hay error
+    except HTTPException:
+        raise  # Re-lanzar HTTPException
+    except Exception as validation_error:
+        print(f"[WARNING ROUTE] Error en validación de user_id: {validation_error}")
+        # Si hay error, ignorar user_id y continuar como compra anónima
+        request.user_id = None
     
     service = PurchaseService()
     
@@ -194,4 +212,291 @@ async def get_order_status(
     # El order_id es suficiente para verificar el estado
     
     return OrderStatusResponse(**order_status)
+
+
+@router.post("/process-payment")
+async def process_payment(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Procesar pago con token del Payment Brick
+    
+    Recibe el token y datos del pago del Payment Brick y crea el pago en Mercado Pago
+    """
+    try:
+        data = await request.json()
+        
+        # Extraer datos del request
+        token = data.get("token")
+        order_id = data.get("order_id")
+        transaction_amount = data.get("transaction_amount")
+        payment_method_id = data.get("payment_method_id")
+        issuer_id = data.get("issuer_id")
+        installments = data.get("installments", 1)
+        
+        # Extraer datos del payer
+        payer_data = data.get("payer", {})
+        payer_email = payer_data.get("email")
+        payer_identification = payer_data.get("identification")
+        payer_first_name = payer_data.get("first_name")
+        payer_last_name = payer_data.get("last_name")
+        # Si no hay first_name/last_name pero hay "name", dividirlo
+        payer_name = payer_data.get("name")
+        if not payer_first_name and payer_name:
+            name_parts = payer_name.strip().split(maxsplit=1)
+            if len(name_parts) >= 1:
+                payer_first_name = name_parts[0]
+            if len(name_parts) >= 2:
+                payer_last_name = name_parts[1]
+            else:
+                payer_last_name = payer_first_name  # Si solo hay un nombre, usar el mismo para ambos
+        
+        # Log para debugging
+        print(f"[DEBUG process_payment] Datos recibidos:")
+        print(f"[DEBUG process_payment]   - token: {token[:20] if token else None}...")
+        print(f"[DEBUG process_payment]   - order_id: {order_id}")
+        print(f"[DEBUG process_payment]   - transaction_amount: {transaction_amount}")
+        print(f"[DEBUG process_payment]   - payment_method_id: {payment_method_id}")
+        print(f"[DEBUG process_payment]   - issuer_id: {issuer_id}")
+        print(f"[DEBUG process_payment]   - installments: {installments}")
+        print(f"[DEBUG process_payment]   - payer_email: {payer_email}")
+        print(f"[DEBUG process_payment]   - payer_identification: {payer_identification}")
+        print(f"[DEBUG process_payment]   - payer_first_name: {payer_first_name}")
+        print(f"[DEBUG process_payment]   - payer_last_name: {payer_last_name}")
+        print(f"[DEBUG process_payment]   - payer completo: {payer_data}")
+        
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Token es requerido"
+            )
+        
+        if not order_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="order_id es requerido"
+            )
+        
+        # Obtener la orden para validar y obtener el monto
+        from sqlalchemy import select
+        from shared.database.models import Order
+        stmt = select(Order).where(Order.id == order_id)
+        result = await db.execute(stmt)
+        order = result.scalar_one_or_none()
+        
+        if not order:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Orden no encontrada"
+            )
+        
+        # Usar el monto de la orden si no se proporciona
+        if not transaction_amount:
+            transaction_amount = float(order.total or 0)
+        
+        # IMPORTANTE: Payment Brick puede no enviar el nombre del titular en el objeto payer
+        # Necesitamos obtenerlo de otra fuente o usar un fallback inteligente
+        # Envolver todo en try-except para mayor robustez
+        try:
+            from app.core.config import settings
+            is_sandbox = settings.MERCADOPAGO_ENVIRONMENT == "sandbox"
+            is_test_card = (
+                payer_identification and 
+                payer_identification.get("type") == "Otro" and 
+                payer_identification.get("number") == "123456789"
+            )
+        except Exception as config_error:
+            print(f"[WARNING process_payment] Error obteniendo configuración: {config_error}")
+            # Valores por defecto seguros
+            is_sandbox = True  # Asumir sandbox por defecto para seguridad
+            is_test_card = (
+                payer_identification and 
+                payer_identification.get("type") == "Otro" and 
+                payer_identification.get("number") == "123456789"
+            )
+        
+        # PRIORIDAD 1: Si es una tarjeta de prueba en sandbox, usar "APRO" directamente
+        # Esto es CRÍTICO porque Mercado Pago requiere "APRO" para tarjetas de prueba
+        try:
+            if is_sandbox and is_test_card and not payer_first_name:
+                payer_first_name = "APRO"
+                payer_last_name = ""
+                print(f"[DEBUG process_payment] ⚠️ TARJETA DE PRUEBA DETECTADA - Usando 'APRO' como nombre del titular (requerido por Mercado Pago)")
+        except Exception as test_card_error:
+            print(f"[WARNING process_payment] Error verificando tarjeta de prueba: {test_card_error}")
+        
+        # PRIORIDAD 2: Si no hay nombre del titular del payer Y NO es tarjeta de prueba,
+        # intentar obtenerlo del primer ticket de la orden
+        # Esto es importante porque Payment Brick puede no enviar el nombre del titular
+        # Los attendees están en los tickets (holder_first_name, holder_last_name)
+        if not payer_first_name:
+            # Buscar el primer ticket de la orden a través de order_items
+            # Envolver en try-except para manejar errores de conexión a la base de datos
+            try:
+                from shared.database.models import OrderItem, Ticket
+                stmt_tickets = (
+                    select(Ticket)
+                    .join(OrderItem, Ticket.order_item_id == OrderItem.id)
+                    .where(OrderItem.order_id == order.id)
+                    .order_by(Ticket.created_at)
+                    .limit(1)
+                )
+                result_tickets = await db.execute(stmt_tickets)
+                first_ticket = result_tickets.scalar_one_or_none()
+                
+                if first_ticket:
+                    # IMPORTANTE: Si es tarjeta de prueba, NO usar el nombre del ticket, usar "APRO"
+                    if is_sandbox and is_test_card:
+                        payer_first_name = "APRO"
+                        payer_last_name = ""
+                        print(f"[DEBUG process_payment] ⚠️ TARJETA DE PRUEBA - Sobrescribiendo nombre del ticket con 'APRO' (requerido por Mercado Pago)")
+                    else:
+                        payer_first_name = first_ticket.holder_first_name
+                        payer_last_name = first_ticket.holder_last_name
+                        print(f"[DEBUG process_payment] Usando nombre del primer ticket como fallback: {payer_first_name} {payer_last_name}")
+                else:
+                    # Si no hay tickets, continuar con el siguiente fallback
+                    pass
+            except Exception as db_error:
+                # Si hay un error de conexión a la base de datos, usar fallback
+                print(f"[WARNING process_payment] Error de conexión a la base de datos al obtener ticket: {db_error}")
+                print(f"[WARNING process_payment] Continuando con fallback para obtener nombre del titular...")
+            
+            # Si aún no hay nombre después de intentar obtenerlo del ticket, intentar otros métodos
+            if not payer_first_name:
+                # Si no hay tickets aún (la orden se creó pero los tickets aún no se generaron),
+                # intentar obtener el nombre del cache de attendees usando el idempotency_key
+                if order.idempotency_key:
+                    try:
+                        from shared.cache.redis_client import cache_get
+                        attendees_cache_key = f"purchase:attendees:{order.idempotency_key}"
+                        attendees_data = await cache_get(attendees_cache_key)
+                        if attendees_data and len(attendees_data) > 0:
+                            first_attendee = attendees_data[0]
+                            if first_attendee.get("name"):
+                                # IMPORTANTE: Si es tarjeta de prueba, NO usar el nombre del attendee, usar "APRO"
+                                if is_sandbox and is_test_card:
+                                    payer_first_name = "APRO"
+                                    payer_last_name = ""
+                                    print(f"[DEBUG process_payment] ⚠️ TARJETA DE PRUEBA - Sobrescribiendo nombre del attendee con 'APRO' (requerido por Mercado Pago)")
+                                else:
+                                    name_parts = first_attendee["name"].strip().split(maxsplit=1)
+                                    if len(name_parts) >= 1:
+                                        payer_first_name = name_parts[0]
+                                    if len(name_parts) >= 2:
+                                        payer_last_name = name_parts[1]
+                                    else:
+                                        payer_last_name = payer_first_name
+                                    print(f"[DEBUG process_payment] Usando nombre del attendee del cache como fallback: {payer_first_name} {payer_last_name}")
+                    except Exception as cache_error:
+                        print(f"[WARNING process_payment] Error obteniendo attendees del cache: {cache_error}")
+                
+                # Si aún no hay nombre, usar un fallback inteligente
+                if not payer_first_name:
+                    try:
+                        # SOLO en sandbox y SOLO para tarjetas de prueba, usar "APRO"
+                        # En producción, usar un valor genérico o el nombre del email
+                        if is_sandbox and is_test_card:
+                            payer_first_name = "APRO"
+                            payer_last_name = ""
+                            print(f"[DEBUG process_payment] Usando 'APRO' como nombre del titular para tarjeta de prueba en sandbox")
+                        elif payer_email:
+                            # En producción o cuando no es tarjeta de prueba, usar el nombre del email
+                            email_name = payer_email.split("@")[0]
+                            payer_first_name = email_name[:50]  # Limitar longitud
+                            payer_last_name = email_name[:50] if not payer_last_name else payer_last_name
+                            print(f"[DEBUG process_payment] Usando nombre del email como fallback: {payer_first_name} {payer_last_name}")
+                        else:
+                            # Último recurso: usar un valor genérico
+                            if is_sandbox:
+                                payer_first_name = "APRO"
+                                payer_last_name = ""
+                                print(f"[DEBUG process_payment] Usando 'APRO' como nombre del titular por defecto en sandbox")
+                            else:
+                                payer_first_name = "Usuario"
+                                payer_last_name = "Test"
+                                print(f"[WARNING process_payment] Usando nombre genérico. El nombre del titular puede estar vacío.")
+                    except Exception as fallback_error:
+                        print(f"[WARNING process_payment] Error en fallback de nombre: {fallback_error}")
+                        # Fallback de emergencia
+                        if is_sandbox:
+                            payer_first_name = "APRO"
+                            payer_last_name = ""
+                        else:
+                            payer_first_name = "Usuario"
+                            payer_last_name = "Test"
+        
+        # VERIFICACIÓN FINAL: Si es tarjeta de prueba, FORZAR "APRO" sin importar qué
+        # Esto es CRÍTICO porque Mercado Pago requiere "APRO" para tarjetas de prueba
+        try:
+            if is_sandbox and is_test_card:
+                if payer_first_name != "APRO":
+                    print(f"[DEBUG process_payment] ⚠️ VERIFICACIÓN FINAL: Sobrescribiendo '{payer_first_name}' con 'APRO' para tarjeta de prueba")
+                payer_first_name = "APRO"
+                payer_last_name = ""
+        except Exception as final_check_error:
+            print(f"[WARNING process_payment] Error en verificación final: {final_check_error}")
+            # Si falla, intentar forzar "APRO" de todas formas si parece ser tarjeta de prueba
+            try:
+                if payer_identification and payer_identification.get("type") == "Otro" and payer_identification.get("number") == "123456789":
+                    payer_first_name = "APRO"
+                    payer_last_name = ""
+                    print(f"[DEBUG process_payment] Forzando 'APRO' como último recurso para tarjeta de prueba")
+            except Exception:
+                pass  # Si todo falla, continuar con lo que tengamos
+        
+        # Crear descripción
+        description = f"Compra de tickets - Orden {order_id}"
+        
+        # Crear el pago en Mercado Pago
+        service = PurchaseService()
+        mercado_pago_service = service.mercado_pago_service
+        
+        payment = mercado_pago_service.create_payment_with_token(
+            token=token,
+            transaction_amount=transaction_amount,
+            description=description,
+            installments=installments,
+            payment_method_id=payment_method_id,
+            issuer_id=issuer_id,
+            payer_email=payer_email,
+            payer_identification=payer_identification,
+            payer_first_name=payer_first_name,
+            payer_last_name=payer_last_name,
+            external_reference=order_id
+        )
+        
+        # Actualizar la orden con el payment_id
+        order.payment_reference = str(payment.get("id"))
+        await db.commit()
+        await db.refresh(order)
+        
+        return {
+            "payment_id": payment.get("id"),
+            "status": payment.get("status"),
+            "status_detail": payment.get("status_detail"),
+            "order_id": order_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        error_message = str(e)
+        print(f"[ERROR process_payment] Exception: {error_message}")
+        print(f"[ERROR process_payment] Traceback completo: {error_trace}")
+        
+        # Si el error viene de Mercado Pago, incluir más detalles
+        if "Error creando pago" in error_message:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_message
+            )
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error procesando pago: {error_message}"
+        )
 

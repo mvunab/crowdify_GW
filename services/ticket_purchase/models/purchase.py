@@ -35,7 +35,8 @@ class PurchaseRequest(BaseModel):
 
 class PurchaseResponse(BaseModel):
     order_id: str
-    payment_link: Optional[str] = None  # Opcional - solo para Mercado Pago
+    payment_link: Optional[str] = None  # Opcional - solo para Mercado Pago (fallback)
+    preference_id: Optional[str] = None  # ID de preferencia para usar con Payment Brick
     status: str  # pending, completed, failed
     payment_method: Optional[str] = None  # 'mercadopago' | 'bank_transfer'
 

@@ -223,6 +223,7 @@ class PurchaseService:
                 return {
                     "order_id": str(existing_order.id),
                     "payment_link": payment_link,
+                    "preference_id": existing_order.payment_reference,
                     "status": existing_order.status,
                     "payment_method": existing_order.payment_provider or "mercadopago"
                 }
@@ -439,7 +440,7 @@ class PurchaseService:
                 print(f"[DEBUG] Creando preferencia de Mercado Pago para orden {order.id}")
                 print(f"[DEBUG] Payment method recibido: {payment_method}")
                 
-                # Construir items para la preferencia (tickets + servicios)
+                # Construir items para la preferencia (tickets + servicios + comisiones)
                 items = []
                 
                 # Item para tickets
@@ -471,7 +472,21 @@ class PurchaseService:
                                 "unit_price": float(service.price)
                             })
                 
+                # Agregar comisión de servicio por cada entrada
+                # Comisión: 1500 CLP por cada entrada (adulto o niño)
+                COMMISSION_PER_TICKET = 1500.0
+                
+                if total_quantity > 0:
+                    items.append({
+                        "title": "Comisión de servicio",
+                        "description": f"Comisión de procesamiento por entrada ({total_quantity} entrada(s))",
+                        "quantity": total_quantity,  # Una comisión por cada entrada
+                        "unit_price": float(COMMISSION_PER_TICKET)  # 1500 CLP por entrada
+                    })
+                
+                commission_total = total_quantity * COMMISSION_PER_TICKET
                 print(f"[DEBUG] Items para preferencia: {items}")
+                print(f"[DEBUG] Comisiones: {total_quantity} entrada(s) × {COMMISSION_PER_TICKET} CLP = {commission_total} CLP")
                 
                 # Obtener información del primer attendee para la preferencia
                 payer_email = None
@@ -514,6 +529,7 @@ class PurchaseService:
                 payment_link = preference["payment_link"]
                 
                 print(f"[DEBUG] Payment link obtenido: {payment_link}")
+                print(f"[DEBUG] Preference ID obtenido: {preference['preference_id']}")
                 
             except Exception as e:
                 # Si falla la creación de preferencia, liberar capacidad y rollback
@@ -533,6 +549,7 @@ class PurchaseService:
             response = {
                 "order_id": str(order.id),
                 "payment_link": payment_link,
+                "preference_id": preference["preference_id"],
                 "status": "pending",
                 "payment_method": "mercadopago"
             }
@@ -781,11 +798,8 @@ class PurchaseService:
                     child_details_data = attendee_data["child_details"]
                     await self._create_child_details(db, ticket, child_details_data)
                 
-                # Calcular comisión
-                if attendee_data.get("is_child"):
-                    commission_amount = 1000.0  # CLP para niño
-                else:
-                    commission_amount = 1500.0  # CLP para adulto
+                # Calcular comisión: 1500 CLP por cada entrada (adulto o niño)
+                commission_amount = 1500.0  # CLP por entrada
                 
                 commission_total += commission_amount
                 
