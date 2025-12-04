@@ -85,3 +85,4 @@ Confirmar orden y generar tickets/productos
 5. Implementar frontend
 6. Testing y validación
 
+

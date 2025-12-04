@@ -304,3 +304,4 @@ if __name__ == "__main__":
         print(f"\n\n{Colors.YELLOW}Pruebas interrumpidas por el usuario{Colors.RESET}")
         sys.exit(1)
 
+

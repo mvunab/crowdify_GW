@@ -128,12 +128,27 @@ class PurchaseService:
                         try:
                             preference = self.mercado_pago_service.get_preference(existing_order.payment_reference)
                             if preference:
-                                # En sandbox, usar sandbox_init_point si está disponible
-                                environment = self.mercado_pago_service.environment
-                                if environment == "sandbox":
-                                    payment_link = preference.get("sandbox_init_point") or preference.get("init_point")
+                                # Verificar que la preferencia tenga back_urls válidas
+                                back_urls = preference.get("back_urls", {})
+                                has_valid_back_urls = (
+                                    back_urls.get("success") and 
+                                    back_urls.get("failure") and 
+                                    back_urls.get("pending")
+                                )
+                                
+                                if not has_valid_back_urls:
+                                    print(f"[WARNING] Preferencia existente tiene back_urls inválidas, creando nueva preferencia")
+                                    print(f"[WARNING] back_urls actuales: {back_urls}")
+                                    payment_link = None
                                 else:
-                                    payment_link = preference.get("init_point")
+                                    # En sandbox, usar sandbox_init_point si está disponible
+                                    environment = self.mercado_pago_service.environment
+                                    if environment == "sandbox":
+                                        payment_link = preference.get("sandbox_init_point") or preference.get("init_point")
+                                    else:
+                                        payment_link = preference.get("init_point")
+                            else:
+                                payment_link = None
                         except Exception as e:
                             print(f"[WARNING] No se pudo obtener payment_link de preferencia existente: {str(e)}")
                             # Si falla, intentar crear una nueva preferencia
@@ -142,14 +157,29 @@ class PurchaseService:
                     # Si no tiene payment_reference o no se pudo obtener el link, crear nueva preferencia
                     if not payment_link:
                         try:
-                            # Obtener información de la orden para crear la preferencia
-                            await db.refresh(existing_order, ["order_items"])
+                            # Obtener order_items directamente con JOIN para evitar problemas de lazy loading
+                            from sqlalchemy.orm import selectinload
+                            
+                            # Query directa de order_items con ticket_types usando JOIN
+                            stmt_order_items = select(OrderItem, TicketType).join(
+                                TicketType, OrderItem.ticket_type_id == TicketType.id, isouter=True
+                            ).where(OrderItem.order_id == existing_order.id)
+                            
+                            result_items = await db.execute(stmt_order_items)
+                            rows = result_items.all()
                             
                             # Construir items desde order_items
                             items = []
-                            for order_item in existing_order.order_items:
+                            for row in rows:
+                                order_item = row[0]
+                                ticket_type = row[1] if len(row) > 1 else None
+                                
+                                ticket_type_name = "Ticket"
+                                if ticket_type:
+                                    ticket_type_name = ticket_type.name
+                                
                                 items.append({
-                                    "title": f"Ticket - {order_item.ticket_type.name if hasattr(order_item, 'ticket_type') and order_item.ticket_type else 'Ticket'}",
+                                    "title": f"Ticket - {ticket_type_name}",
                                     "description": f"{order_item.quantity} ticket(s)",
                                     "quantity": order_item.quantity,
                                     "unit_price": float(order_item.unit_price)
@@ -186,6 +216,9 @@ class PurchaseService:
                             print(f"[ERROR] Error creando preferencia para orden existente: {str(e)}")
                             import traceback
                             print(traceback.format_exc())
+                            # No propagar el error, simplemente retornar sin payment_link
+                            # para que el frontend pueda manejar el error
+                            payment_link = None
                 
                 return {
                     "order_id": str(existing_order.id),
@@ -466,6 +499,16 @@ class PurchaseService:
                 )
                 
                 print(f"[DEBUG] Preferencia creada: {preference}")
+                
+                # Validar que la preferencia tenga los campos necesarios
+                if not preference.get("preference_id"):
+                    raise ValueError("La preferencia no tiene preference_id")
+                
+                if not preference.get("payment_link"):
+                    print(f"[ERROR] Preferencia creada pero sin payment_link:")
+                    print(f"[ERROR]   - preference_id: {preference.get('preference_id')}")
+                    print(f"[ERROR]   - preference completa: {preference}")
+                    raise ValueError("La preferencia se creó pero no tiene payment_link")
                 
                 order.payment_reference = preference["preference_id"]
                 payment_link = preference["payment_link"]

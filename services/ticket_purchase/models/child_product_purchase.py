@@ -119,3 +119,4 @@ class ChildProductPurchaseStatusResponse(BaseModel):
     products: List[PurchasedProductDetail]
     buyer_info: Optional[BuyerInfo] = None  # Solo si es compra de visitante
 
+

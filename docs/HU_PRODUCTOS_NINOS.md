@@ -439,3 +439,4 @@ class Order(Base):
 - **HU de Pagos**: Se integra con el sistema de pagos existente
 - **HU de Stock**: Se extiende el sistema de stock para productos
 
+

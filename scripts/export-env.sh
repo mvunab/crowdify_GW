@@ -43,3 +43,4 @@ echo ""
 echo "⚠️  IMPORTANTE: Configura las variables que están comentadas arriba"
 echo "   Edita este archivo y descomenta/completa las variables necesarias"
 
+

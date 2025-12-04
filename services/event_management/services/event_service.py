@@ -6,11 +6,41 @@ from typing import List, Optional
 from datetime import datetime
 from uuid import UUID
 from shared.database.models import Event, Organizer, TicketType
-from shared.cache.redis_client import cache_get, cache_set, cache_delete
+from shared.cache.redis_client import cache_get, cache_set, cache_delete, get_redis
 
 
 class EventService:
     """Servicio para gestionar eventos"""
+
+    @staticmethod
+    def _build_cache_key(
+        category: Optional[str] = None,
+        search: Optional[str] = None,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+        limit: int = 50,
+        offset: int = 0
+    ) -> str:
+        """
+        Construir clave de cache basada en los filtros
+        """
+        import hashlib
+        
+        # Crear string con todos los parámetros
+        params = {
+            "category": category or "",
+            "search": search or "",
+            "date_from": date_from.isoformat() if date_from else "",
+            "date_to": date_to.isoformat() if date_to else "",
+            "limit": limit,
+            "offset": offset
+        }
+        
+        # Crear hash de los parámetros para la clave
+        params_str = f"{params['category']}_{params['search']}_{params['date_from']}_{params['date_to']}_{params['limit']}_{params['offset']}"
+        params_hash = hashlib.md5(params_str.encode()).hexdigest()
+        
+        return f"events:list:{params_hash}"
 
     @staticmethod
     async def get_events(
@@ -20,15 +50,19 @@ class EventService:
         date_from: Optional[datetime] = None,
         date_to: Optional[datetime] = None,
         limit: int = 50,
-        offset: int = 0
+        offset: int = 0,
+        use_cache: bool = True
     ) -> List[Event]:
         """
         Obtener lista de eventos con filtros
 
         Compatible con: eventsService.getEvents()
+        
+        Args:
+            use_cache: Si es True, intenta obtener del cache primero
         """
-        # Cache deshabilitado temporalmente para evitar inconsistencias
-        # TODO: Implementar cache más robusto con invalidación automática
+        # Nota: El cache se maneja en el endpoint (routes/events.py) después de serializar
+        # Aquí solo cargamos desde DB
 
         # Asegurar que estamos en el schema public (Session Pooler puede resetearlo)
         try:
@@ -137,6 +171,9 @@ class EventService:
         db.add(event)
         await db.commit()
         await db.refresh(event)
+        
+        # Invalidar cache de eventos
+        await EventService._invalidate_events_cache()
 
         # ✅ Crear ticket_type "General" si se proporciona precio
         if "price" in event_data and event_data["price"] is not None and event_data["price"] > 0:
@@ -176,9 +213,17 @@ class EventService:
     @staticmethod
     async def _invalidate_events_cache():
         """Invalidar cache de listado de eventos"""
-        # Invalidar todos los posibles límites en cache
-        for limit in [10, 20, 50, 100]:
-            await cache_delete(f"events:list:{limit}")
+        # Invalidar todas las claves de cache de eventos usando patrón
+        try:
+            redis_conn = await get_redis()
+            # Buscar todas las claves que empiecen con "events:list:"
+            keys = await redis_conn.keys("events:list:*")
+            if keys:
+                await redis_conn.delete(*keys)
+                print(f"[Cache] Invalidadas {len(keys)} claves de cache de eventos")
+        except Exception as e:
+            print(f"[Cache] Error invalidando cache de eventos: {e}")
+            # Si falla, continuar sin cache
 
     @staticmethod
     async def update_event(

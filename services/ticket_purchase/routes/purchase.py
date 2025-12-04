@@ -139,12 +139,15 @@ async def mercado_pago_webhook(
 async def get_order_status(
     order_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Dict = Depends(get_current_user)
+    current_user: Optional[Dict] = Depends(get_optional_user)
 ):
     """
     Obtener estado de una orden
     
     Compatible con: ticketsService.getOrderStatus()
+    
+    NOTA: Para compras anónimas, se permite verificar el estado sin autenticación
+    usando solo el order_id (que es un UUID único).
     """
     service = PurchaseService()
     order_status = await service.get_order_status(db, order_id)
@@ -162,24 +165,33 @@ async def get_order_status(
     result = await db.execute(stmt)
     order = result.scalar_one_or_none()
     
-    # Verificar acceso: si la orden tiene user_id, debe coincidir con el usuario autenticado
-    # Si no tiene user_id (compra anónima), solo admins/coordinadores pueden verla
-    if order:
-        if order.user_id:
-            # Orden con user_id - verificar que coincida
-            if str(order.user_id) != current_user.get("user_id"):
-                if current_user.get("role") not in ["admin", "coordinator"]:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="No tienes acceso a esta orden"
-                    )
-        else:
-            # Orden sin user_id (compra anónima) - solo admins/coordinadores pueden verla
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Orden no encontrada"
+        )
+    
+    # Verificar acceso:
+    # 1. Si la orden es anónima (sin user_id), permitir acceso sin autenticación
+    #    (el order_id es un UUID único, suficiente para verificar)
+    # 2. Si la orden tiene user_id, verificar que coincida con el usuario autenticado
+    # 3. Admins/coordinadores siempre pueden ver cualquier orden
+    if order.user_id:
+        # Orden con user_id - requiere autenticación y verificación
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Debes estar autenticado para ver esta orden"
+            )
+        # Verificar que el usuario coincida o sea admin/coordinator
+        if str(order.user_id) != current_user.get("user_id"):
             if current_user.get("role") not in ["admin", "coordinator"]:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="No tienes acceso a esta orden"
                 )
+    # Si no tiene user_id (compra anónima), permitir acceso sin autenticación
+    # El order_id es suficiente para verificar el estado
     
     return OrderStatusResponse(**order_status)
 

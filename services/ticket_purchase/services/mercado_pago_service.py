@@ -93,12 +93,42 @@ class MercadoPagoService:
         """
         # URLs de retorno
         # Nota: Estas URLs deben coincidir con las rutas del frontend
+        # IMPORTANTE: Mercado Pago puede rechazar URLs HTTP en sandbox
+        # Si el base_url es HTTP y no hay NGROK_URL, usar URLs relativas o omitir back_urls
         if not back_urls:
-            back_urls = {
-                "success": f"{self.base_url}/compra-exitosa",
-                "failure": f"{self.base_url}/compra-fallida",
-                "pending": f"{self.base_url}/compra-pendiente"
-            }
+            # Si tenemos ngrok (HTTPS), usarlo para back_urls
+            if hasattr(settings, 'NGROK_URL') and settings.NGROK_URL:
+                ngrok_base = settings.NGROK_URL
+                back_urls = {
+                    "success": f"{ngrok_base}/compra-exitosa",
+                    "failure": f"{ngrok_base}/compra-fallida",
+                    "pending": f"{ngrok_base}/compra-pendiente"
+                }
+            # Si el base_url es HTTPS, usarlo directamente
+            elif self.base_url.startswith("https://"):
+                back_urls = {
+                    "success": f"{self.base_url}/compra-exitosa",
+                    "failure": f"{self.base_url}/compra-fallida",
+                    "pending": f"{self.base_url}/compra-pendiente"
+                }
+            # Si es HTTP localhost, intentar usar back_urls de todas formas
+            # Mercado Pago puede rechazarlas, pero al menos lo intentamos
+            else:
+                back_urls = {
+                    "success": f"{self.base_url}/compra-exitosa",
+                    "failure": f"{self.base_url}/compra-fallida",
+                    "pending": f"{self.base_url}/compra-pendiente"
+                }
+                print(f"[WARNING MercadoPago] Usando URLs HTTP para back_urls. Mercado Pago puede rechazarlas.")
+                print(f"[WARNING MercadoPago] Considera usar ngrok (HTTPS) para desarrollo: NGROK_URL=https://xxx.ngrok.io")
+        
+        # Validar que las back_urls no estén vacías
+        if not back_urls.get("success") or not back_urls.get("failure") or not back_urls.get("pending"):
+            raise ValueError(
+                f"Las back_urls no pueden estar vacías. "
+                f"Recibidas: {back_urls}. "
+                f"base_url configurado: {self.base_url}"
+            )
         
         # Construir items para la preferencia
         preference_items = []
@@ -145,8 +175,12 @@ class MercadoPagoService:
             "expiration_date_to": (datetime.utcnow() + timedelta(hours=24)).isoformat(),
             # Configuraciones adicionales para mejorar compatibilidad
             "binary_mode": False,  # Permitir estados pendientes
-            "installments": 1,  # Número mínimo de cuotas
-            "max_installments": 12  # Número máximo de cuotas
+            # Configuración para permitir pagos sin cuenta (guest checkout)
+            "payment_methods": {
+                "excluded_payment_types": [],  # No excluir ningún tipo de pago
+                "excluded_payment_methods": [],  # No excluir ningún método de pago
+                "installments": 12  # Permitir hasta 12 cuotas
+            }
         }
         
         # Agregar payer con información completa (mejora tasa de aprobación)
@@ -171,10 +205,29 @@ class MercadoPagoService:
             
             preference_data["payer"] = payer_data
         
-        # Solo agregar auto_return si las URLs son HTTPS (producción)
-        # En desarrollo local (HTTP), no usar auto_return
+        # Configurar auto_return para redirección automática después del pago
+        # IMPORTANTE: auto_return solo funciona con URLs HTTPS
+        # No usar auto_return en desarrollo local (HTTP) porque Mercado Pago lo rechaza
         if self.base_url.startswith("https://"):
             preference_data["auto_return"] = "approved"
+        
+        # Log detallado de la preferencia antes de crearla
+        print(f"[DEBUG MercadoPago] Creando preferencia con los siguientes datos:")
+        print(f"[DEBUG MercadoPago]   - items: {len(preference_items)} items")
+        print(f"[DEBUG MercadoPago]   - back_urls: {back_urls}")
+        print(f"[DEBUG MercadoPago]   - external_reference: {order_id}")
+        print(f"[DEBUG MercadoPago]   - notification_url: {preference_data.get('notification_url')}")
+        print(f"[DEBUG MercadoPago]   - payment_methods: {preference_data.get('payment_methods')}")
+        print(f"[DEBUG MercadoPago]   - payer: {preference_data.get('payer', 'No definido')}")
+        print(f"[DEBUG MercadoPago]   - auto_return: {preference_data.get('auto_return', 'No definido')}")
+        print(f"[DEBUG MercadoPago]   - environment: {self.environment}")
+        print(f"[DEBUG MercadoPago]   - base_url: {self.base_url}")
+        
+        # Validar que las back_urls estén en preference_data
+        if not preference_data.get("back_urls") or not all(preference_data["back_urls"].values()):
+            print(f"[ERROR MercadoPago] Las back_urls están vacías o inválidas!")
+            print(f"[ERROR MercadoPago] back_urls en preference_data: {preference_data.get('back_urls')}")
+            raise ValueError("Las back_urls no pueden estar vacías en la preferencia")
         
         # Crear preferencia
         try:
@@ -229,6 +282,38 @@ class MercadoPagoService:
         
         preference = preference_response["response"]
         
+        # Verificar que las back_urls se guardaron correctamente
+        saved_back_urls = preference.get('back_urls', {})
+        has_valid_back_urls = (
+            saved_back_urls.get("success") and 
+            saved_back_urls.get("failure") and 
+            saved_back_urls.get("pending")
+        )
+        
+        if not has_valid_back_urls:
+            print(f"[WARNING MercadoPago] ⚠️ Las back_urls NO se guardaron correctamente en la preferencia!")
+            print(f"[WARNING MercadoPago]   - back_urls enviadas: {back_urls}")
+            print(f"[WARNING MercadoPago]   - back_urls guardadas: {saved_back_urls}")
+            print(f"[WARNING MercadoPago]   - Esto puede causar problemas con la redirección después del pago")
+            print(f"[WARNING MercadoPago]   - Posible causa: Mercado Pago rechaza URLs HTTP en sandbox")
+            print(f"[WARNING MercadoPago]   - Solución: Usa ngrok (HTTPS) configurando NGROK_URL en .env")
+        
+        # Log de la preferencia completa para debugging
+        print(f"[DEBUG MercadoPago] Preferencia creada exitosamente:")
+        print(f"[DEBUG MercadoPago]   - preference_id: {preference.get('id')}")
+        print(f"[DEBUG MercadoPago]   - environment: {self.environment}")
+        print(f"[DEBUG MercadoPago]   - sandbox_init_point: {preference.get('sandbox_init_point')}")
+        print(f"[DEBUG MercadoPago]   - init_point: {preference.get('init_point')}")
+        print(f"[DEBUG MercadoPago]   - payment_methods config: {preference.get('payment_methods')}")
+        print(f"[DEBUG MercadoPago]   - payer config: {preference.get('payer')}")
+        print(f"[DEBUG MercadoPago]   - back_urls guardadas: {saved_back_urls}")
+        
+        # Verificar si hay warnings o errores en la respuesta
+        if 'warnings' in preference:
+            print(f"[WARNING MercadoPago] Warnings en la preferencia: {preference.get('warnings')}")
+        if 'errors' in preference:
+            print(f"[ERROR MercadoPago] Errores en la preferencia: {preference.get('errors')}")
+        
         # En sandbox, usar sandbox_init_point si está disponible, sino init_point
         # En producción, usar init_point
         payment_link = None
@@ -238,7 +323,12 @@ class MercadoPagoService:
             payment_link = preference.get("init_point")
         
         if not payment_link:
-            raise Exception("No se pudo obtener el link de pago de la preferencia")
+            # Log detallado del error
+            print(f"[ERROR MercadoPago] No se pudo obtener payment_link de la preferencia")
+            print(f"[ERROR MercadoPago] Preferencia completa: {preference}")
+            raise Exception(f"No se pudo obtener el link de pago de la preferencia. Preferencia ID: {preference.get('id')}")
+        
+        print(f"[DEBUG MercadoPago] Payment link extraído: {payment_link}")
         
         return {
             "preference_id": preference["id"],
