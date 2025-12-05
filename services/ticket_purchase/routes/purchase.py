@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.sql import func
 from typing import Dict, Optional
 from shared.database.session import get_db
 from shared.auth.dependencies import get_current_user, get_optional_user
@@ -498,5 +499,280 @@ async def process_payment(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error procesando pago: {error_message}"
+        )
+
+
+@router.get("/admin/completed-orders")
+async def admin_list_completed_orders(
+    db: AsyncSession = Depends(get_db),
+    limit: int = 50
+):
+    """
+    Listar órdenes completadas para reenvío de tickets
+    
+    Query params:
+    - limit: Máximo de órdenes a retornar (default: 50)
+    """
+    try:
+        from shared.database.models import Order, Ticket, OrderItem
+        
+        # Buscar órdenes completadas
+        result = await db.execute(
+            select(Order)
+            .where(Order.status == "completed")
+            .order_by(Order.created_at.desc())
+            .limit(limit)
+        )
+        orders = result.scalars().all()
+        
+        # Para cada orden, obtener información de tickets
+        orders_data = []
+        for order in orders:
+            # Contar tickets haciendo JOIN con OrderItem
+            result_tickets = await db.execute(
+                select(Ticket)
+                .join(OrderItem, Ticket.order_item_id == OrderItem.id)
+                .where(OrderItem.order_id == order.id)
+            )
+            tickets = result_tickets.scalars().all()
+            
+            # Solo incluir órdenes con al menos 1 ticket
+            if not tickets:
+                continue
+            
+            # Obtener email del primer ticket
+            email = tickets[0].holder_email if tickets[0].holder_email else None
+            
+            orders_data.append({
+                "order_id": str(order.id),
+                "status": order.status,
+                "total": float(order.total),
+                "currency": order.currency,
+                "created_at": str(order.created_at),
+                "paid_at": str(order.paid_at) if order.paid_at else None,
+                "tickets_count": len(tickets),
+                "email": email,
+                "payment_provider": order.payment_provider
+            })
+        
+        return {
+            "success": True,
+            "count": len(orders_data),
+            "orders": orders_data
+        }
+        
+    except Exception as e:
+        print(f"[ADMIN ERROR] Error listando órdenes: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error listando órdenes: {str(e)}"
+        )
+
+
+@router.post("/admin/resend-tickets/{order_id}")
+async def admin_resend_tickets(
+    order_id: str,
+    email: Optional[str] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Reenviar tickets de una orden completada por email
+    
+    Este endpoint:
+    1. Busca la orden y verifica que esté completada
+    2. Obtiene los tickets asociados
+    3. Envía los tickets por email
+    
+    Query params:
+    - email (opcional): Email alternativo para enviar. Si no se proporciona, usa el email de los tickets
+    """
+    try:
+        from shared.database.models import Order, Ticket, OrderItem
+        from uuid import UUID
+        
+        # Buscar la orden
+        result = await db.execute(
+            select(Order).where(Order.id == UUID(order_id))
+        )
+        order = result.scalar_one_or_none()
+        
+        if not order:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Orden {order_id} no encontrada"
+            )
+        
+        # Verificar que la orden esté completada
+        if order.status != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Solo se pueden reenviar tickets de órdenes completadas. Estado actual: {order.status}"
+            )
+        
+        # Buscar tickets de la orden haciendo JOIN con OrderItem
+        result = await db.execute(
+            select(Ticket)
+            .join(OrderItem, Ticket.order_item_id == OrderItem.id)
+            .where(OrderItem.order_id == order.id)
+        )
+        tickets = result.scalars().all()
+        
+        if not tickets:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No se encontraron tickets para esta orden"
+            )
+        
+        # Determinar email destino
+        target_email = email if email else tickets[0].holder_email
+        
+        if not target_email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No se pudo determinar el email destino. Proporciona un email como parámetro."
+            )
+        
+        print(f"[RESEND] Reenviando {len(tickets)} tickets de orden {order_id} a {target_email}")
+        
+        # TODO: Implementar envío de email cuando esté configurado
+        # Por ahora solo retornamos la información
+        
+        return {
+            "success": True,
+            "order_id": str(order.id),
+            "email": target_email,
+            "tickets_count": len(tickets),
+            "ticket_ids": [str(t.id) for t in tickets],
+            "message": "⚠️ Servicio de email no configurado. Los tickets están listos pero no se enviaron.",
+            "note": "Configura EMAIL_PROVIDER y EMAIL_API_KEY en .env para habilitar envío de emails"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[RESEND ERROR] Error reenviando tickets: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error reenviando tickets: {str(e)}"
+        )
+
+
+@router.post("/admin/complete-order/{order_id}")
+async def admin_complete_order(
+    order_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Endpoint administrativo para completar una orden manualmente y enviar tickets
+    
+    SOLO PARA DESARROLLO/TESTING
+    
+    Este endpoint:
+    1. Marca la orden como completada
+    2. Genera los tickets
+    3. Envía los emails con los tickets
+    
+    Útil para probar el flujo sin pagos reales
+    """
+    service = PurchaseService()
+    
+    try:
+        # Importar modelos necesarios
+        from shared.database.models import Order
+        from uuid import UUID
+        
+        # Buscar la orden
+        result = await db.execute(
+            select(Order).where(Order.id == UUID(order_id))
+        )
+        order = result.scalar_one_or_none()
+        
+        if not order:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Orden {order_id} no encontrada"
+            )
+        
+        # Verificar que la orden esté en pending
+        if order.status != "pending":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"La orden ya está en estado '{order.status}'. Solo se pueden completar órdenes en 'pending'"
+            )
+        
+        print(f"[ADMIN] Completando orden manualmente: {order_id}")
+        print(f"[ADMIN] Orden actual - Status: {order.status}, Provider: {order.payment_provider}")
+        
+        # Actualizar orden a completada
+        order.status = "completed"
+        order.paid_at = func.now()
+        await db.commit()
+        await db.refresh(order)
+        
+        print(f"[ADMIN] Orden actualizada a 'completed'")
+        
+        # Cargar order_items para saber cuántos tickets generar
+        from shared.database.models import OrderItem
+        result_items = await db.execute(
+            select(OrderItem).where(OrderItem.order_id == order.id)
+        )
+        order_items = result_items.scalars().all()
+        
+        if not order_items:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No se encontraron items para esta orden"
+            )
+        
+        # Crear datos de attendees genéricos
+        attendees_data = []
+        for idx, item in enumerate(order_items):
+            for qty_idx in range(item.quantity):
+                attendees_data.append({
+                    "name": f"Asistente {len(attendees_data) + 1}",
+                    "email": f"ticket{len(attendees_data) + 1}@completed.order",
+                    "document_type": "RUT",
+                    "document_number": None,
+                    "is_child": False
+                })
+        
+        print(f"[ADMIN] Creados {len(attendees_data)} attendees genéricos")
+        
+        # Generar tickets
+        tickets = await service._generate_tickets(
+            db=db,
+            order=order,
+            attendees_data=attendees_data,
+            ticket_status="issued"
+        )
+        
+        print(f"[ADMIN] Generados {len(tickets)} tickets")
+        
+        # Enviar emails con tickets
+        # TODO: Implementar envío de emails cuando el servicio de email esté configurado
+        print(f"[ADMIN] ⚠️  Email no enviado - Servicio de email no configurado")
+        print(f"[ADMIN] Los tickets fueron generados y están disponibles en la base de datos")
+        
+        return {
+            "success": True,
+            "order_id": str(order.id),
+            "status": order.status,
+            "paid_at": str(order.paid_at) if order.paid_at else None,
+            "tickets_generated": len(tickets),
+            "ticket_ids": [str(t.id) for t in tickets],
+            "message": "Orden completada manualmente. Tickets generados correctamente."
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ADMIN ERROR] Error completando orden: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error completando orden: {str(e)}"
         )
 
