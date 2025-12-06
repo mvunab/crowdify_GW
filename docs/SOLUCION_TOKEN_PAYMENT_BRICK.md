@@ -94,3 +94,4 @@ En ese caso, puedes:
 - [Documentación de Mercado Pago - Credenciales](https://www.mercadopago.com/developers/es/docs/checkout-api/additional-content/credentials)
 - [Documentación de Payment Brick](https://www.mercadopago.com/developers/es/docs/checkout-bricks/payment-brick/introduction)
 
+
