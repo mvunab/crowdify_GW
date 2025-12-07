@@ -376,7 +376,8 @@ class MercadoPagoService:
         payer_identification: Optional[Dict[str, str]] = None,
         payer_first_name: Optional[str] = None,
         payer_last_name: Optional[str] = None,
-        external_reference: Optional[str] = None
+        external_reference: Optional[str] = None,
+        device_id: Optional[str] = None
     ) -> Dict:
         """
         Crear un pago usando un token de tarjeta generado por el Payment Brick
@@ -419,37 +420,31 @@ class MercadoPagoService:
             payer_data["last_name"] = payer_last_name
         
         # IMPORTANTE: Si no hay nombre del titular, usar un fallback inteligente
-        # SOLO usar "APRO" en sandbox y SOLO para tarjetas de prueba
-        # En producción, usar el nombre real del usuario
+        # Para tarjetas de prueba, usar "APRO" si el documento es "Otro" y "123456789"
         if not payer_first_name:
-            # Verificar si es una tarjeta de prueba
+            # Verificar si es una tarjeta de prueba (documento "Otro" con número "123456789")
             is_test_card = (
                 payer_identification and 
                 payer_identification.get("type") == "Otro" and 
                 payer_identification.get("number") == "123456789"
             )
             
-            if self.environment == "sandbox" and is_test_card:
-                # SOLO en sandbox y SOLO para tarjetas de prueba, usar "APRO"
+            if is_test_card:
+                # Para tarjetas de prueba, usar "APRO" para aprobación inmediata
                 payer_data["first_name"] = "APRO"
                 payer_data["last_name"] = ""  # Para tarjetas de prueba, solo se necesita el first_name
-                print(f"[DEBUG MercadoPago] Usando 'APRO' como nombre del titular para tarjeta de prueba en sandbox")
+                print(f"[DEBUG MercadoPago] ✅ Usando 'APRO' como nombre del titular para tarjeta de prueba (documento Otro/123456789)")
             elif payer_email:
-                # En producción o cuando no es tarjeta de prueba, usar el nombre del email
+                # Si no es tarjeta de prueba, usar el nombre del email
                 email_name = payer_email.split("@")[0]
                 payer_data["first_name"] = email_name[:50]  # Limitar longitud
                 payer_data["last_name"] = email_name[:50] if not payer_last_name else payer_last_name
                 print(f"[DEBUG MercadoPago] Usando nombre del email como fallback: {payer_data['first_name']} {payer_data.get('last_name', '')}")
             else:
                 # Último recurso: usar un valor genérico
-                if self.environment == "sandbox":
-                    payer_data["first_name"] = "APRO"
-                    payer_data["last_name"] = ""
-                    print(f"[DEBUG MercadoPago] Usando 'APRO' como nombre del titular por defecto en sandbox")
-                else:
-                    payer_data["first_name"] = "Usuario"
-                    payer_data["last_name"] = "Test" if not payer_last_name else payer_last_name
-                    print(f"[WARNING MercadoPago] Usando nombre genérico. El nombre del titular puede estar vacío.")
+                payer_data["first_name"] = "Usuario"
+                payer_data["last_name"] = "Test" if not payer_last_name else payer_last_name
+                print(f"[WARNING MercadoPago] Usando nombre genérico. El nombre del titular puede estar vacío.")
         
         if payer_identification:
             payer_data["identification"] = payer_identification
@@ -461,8 +456,35 @@ class MercadoPagoService:
         if external_reference:
             payment_data["external_reference"] = external_reference
         
+        # Agregar notification_url para recibir webhooks cuando el pago cambie de estado
+        notification_url = f"{self.webhook_base_url}/api/v1/purchases/webhook"
+        payment_data["notification_url"] = notification_url
+        print(f"[DEBUG MercadoPago]   - notification_url: {notification_url}")
+        
         # Agregar three_d_secure_mode para soportar 3DS
         payment_data["three_d_secure_mode"] = "optional"
+        
+        # Agregar statement_descriptor para que el cargo aparezca claramente en el estado de cuenta
+        # Esto ayuda a reducir rechazos porque el usuario reconoce el cargo
+        payment_data["statement_descriptor"] = "TICKETS EVENTO"
+        
+        # Agregar datos adicionales (additional_info) para mejorar tasa de aprobación
+        # Según documentación: https://www.mercadopago.cl/developers/es/docs/checkout-api/how-tos/improve-payment-approval
+        # NOTA: additional_info NO debe incluir información del payer (ya está en el nivel superior)
+        # Solo debe incluir items y shipping si aplica
+        additional_info = {
+            "items": [{
+                "id": external_reference or "ticket",
+                "title": description or "Compra de tickets",
+                "description": description or "Compra de tickets para evento",
+                "quantity": 1,
+                "unit_price": float(transaction_amount),
+                "category_id": "tickets"  # Categoría del producto ayuda al antifraude
+            }]
+        }
+        
+        payment_data["additional_info"] = additional_info
+        print(f"[DEBUG MercadoPago] ✅ Datos adicionales incluidos para mejorar aprobación (items + statement_descriptor)")
         
         # Validar que el token sea consistente con el entorno
         # Los tokens de sandbox empiezan con "TEST-", los de producción con "APP_USR-"
@@ -511,6 +533,13 @@ class MercadoPagoService:
                     "Content-Type": "application/json",
                     "X-Idempotency-Key": external_reference or f"payment_{datetime.utcnow().isoformat()}"
                 }
+                
+                # Agregar Device ID si está disponible (importante para mejorar tasa de aprobación)
+                if device_id:
+                    headers["X-meli-session-id"] = device_id
+                    print(f"[DEBUG MercadoPago] ✅ Device ID incluido en header X-meli-session-id: {device_id[:20]}...")
+                else:
+                    print(f"[WARNING MercadoPago] ⚠️  Device ID no disponible. Esto puede afectar la tasa de aprobación.")
                 
                 print(f"[DEBUG MercadoPago] Usando API directa (requests) para forzar sandbox")
                 print(f"[DEBUG MercadoPago]   - URL: {api_url}")
@@ -563,16 +592,57 @@ class MercadoPagoService:
                 print(f"[ERROR] Traceback: {traceback.format_exc()}")
                 raise Exception(error_msg)
         else:
-            # Usar el SDK normalmente para tokens TEST- o en producción
-            try:
-                payment_response = self.sdk.payment().create(payment_data)
-                print(f"[DEBUG MercadoPago] Respuesta de Mercado Pago (SDK): {payment_response}")
-            except Exception as e:
-                error_msg = f"Error al crear pago con Mercado Pago: {str(e)}"
-                print(f"[ERROR] {error_msg}")
-                import traceback
-                print(f"[ERROR] Traceback: {traceback.format_exc()}")
-                raise Exception(error_msg)
+            # Si tenemos Device ID, usar API directa para poder enviar el header X-meli-session-id
+            # El SDK no permite enviar headers personalizados
+            if device_id:
+                try:
+                    api_url = "https://api.mercadopago.com/v1/payments"
+                    headers = {
+                        "Authorization": f"Bearer {self.access_token}",
+                        "Content-Type": "application/json",
+                        "X-Idempotency-Key": external_reference or f"payment_{datetime.utcnow().isoformat()}",
+                        "X-meli-session-id": device_id  # Device ID para mejorar aprobación
+                    }
+                    
+                    print(f"[DEBUG MercadoPago] Usando API directa para incluir Device ID")
+                    print(f"[DEBUG MercadoPago]   - Device ID: {device_id[:20]}...")
+                    
+                    response = requests.post(api_url, json=payment_data, headers=headers, timeout=30)
+                    
+                    if response.status_code not in [200, 201]:
+                        error_data = response.json() if response.text else {}
+                        error_message = error_data.get('message', 'Error desconocido')
+                        raise Exception(f"Error creando pago: {error_message}")
+                    
+                    payment = response.json()
+                    payment_response = {
+                        "status": response.status_code,
+                        "response": payment
+                    }
+                    print(f"[DEBUG MercadoPago] Pago creado exitosamente con Device ID")
+                except requests.exceptions.RequestException as e:
+                    print(f"[WARNING MercadoPago] Error usando API directa con Device ID: {e}")
+                    print(f"[WARNING MercadoPago] Intentando con SDK como fallback...")
+                    # Fallback al SDK si falla la API directa
+                    payment_response = self.sdk.payment().create(payment_data)
+                    print(f"[DEBUG MercadoPago] Respuesta de Mercado Pago (SDK fallback): {payment_response}")
+                except Exception as e:
+                    print(f"[WARNING MercadoPago] Error usando API directa con Device ID: {e}")
+                    print(f"[WARNING MercadoPago] Intentando con SDK como fallback...")
+                    # Fallback al SDK si falla la API directa
+                    payment_response = self.sdk.payment().create(payment_data)
+                    print(f"[DEBUG MercadoPago] Respuesta de Mercado Pago (SDK fallback): {payment_response}")
+            else:
+                # Usar el SDK normalmente si no hay Device ID
+                try:
+                    payment_response = self.sdk.payment().create(payment_data)
+                    print(f"[DEBUG MercadoPago] Respuesta de Mercado Pago (SDK): {payment_response}")
+                except Exception as e:
+                    error_msg = f"Error al crear pago con Mercado Pago: {str(e)}"
+                    print(f"[ERROR] {error_msg}")
+                    import traceback
+                    print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                    raise Exception(error_msg)
         
         # El SDK de Mercado Pago puede retornar diferentes estructuras
         # Verificar si es un dict con 'status' o si es directamente la respuesta

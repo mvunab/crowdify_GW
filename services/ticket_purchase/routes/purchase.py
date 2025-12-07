@@ -1,4 +1,5 @@
 """Rutas de compra de tickets"""
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -126,6 +127,10 @@ async def mercado_pago_webhook(
         # Obtener body
         data = await request.json()
         
+        print(f"🔔 [WEBHOOK] Webhook recibido!")
+        print(f"🔔 [WEBHOOK] Headers - x-signature: {signature is not None}, x-request-id: {request_id}")
+        print(f"🔔 [WEBHOOK] Body: {data}")
+        
         # Verificar firma del webhook
         mercado_pago_service = service.mercado_pago_service
         is_valid = mercado_pago_service.verify_webhook(
@@ -136,11 +141,13 @@ async def mercado_pago_webhook(
         )
         
         if not is_valid:
-            print("⚠️  Webhook con firma inválida, pero procesando de todas formas (modo desarrollo)")
+            print("⚠️  [WEBHOOK] Webhook con firma inválida, pero procesando de todas formas (modo desarrollo)")
             # En producción, podrías retornar 401 aquí
         
         # Procesar webhook
+        print(f"🔔 [WEBHOOK] Procesando webhook...")
         success = await service.process_payment_webhook(db, data)
+        print(f"🔔 [WEBHOOK] Resultado del procesamiento: {success}")
         
         if success:
             return {"status": "ok"}
@@ -235,6 +242,7 @@ async def process_payment(
         payment_method_id = data.get("payment_method_id")
         issuer_id = data.get("issuer_id")
         installments = data.get("installments", 1)
+        device_id = data.get("device_id")  # Device ID de Mercado Pago (importante para aprobación)
         
         # Extraer datos del payer
         payer_data = data.get("payer", {})
@@ -266,6 +274,7 @@ async def process_payment(
         print(f"[DEBUG process_payment]   - payer_first_name: {payer_first_name}")
         print(f"[DEBUG process_payment]   - payer_last_name: {payer_last_name}")
         print(f"[DEBUG process_payment]   - payer completo: {payer_data}")
+        print(f"[DEBUG process_payment]   - device_id: {device_id if device_id else 'NO DISPONIBLE'}")
         
         if not token:
             raise HTTPException(
@@ -317,13 +326,14 @@ async def process_payment(
                 payer_identification.get("number") == "123456789"
             )
         
-        # PRIORIDAD 1: Si es una tarjeta de prueba en sandbox, usar "APRO" directamente
+        # PRIORIDAD 1: Si es una tarjeta de prueba, usar "APRO" directamente
         # Esto es CRÍTICO porque Mercado Pago requiere "APRO" para tarjetas de prueba
+        # Funciona tanto en sandbox como en producción
         try:
-            if is_sandbox and is_test_card and not payer_first_name:
+            if is_test_card and not payer_first_name:
                 payer_first_name = "APRO"
                 payer_last_name = ""
-                print(f"[DEBUG process_payment] ⚠️ TARJETA DE PRUEBA DETECTADA - Usando 'APRO' como nombre del titular (requerido por Mercado Pago)")
+                print(f"[DEBUG process_payment] ✅ TARJETA DE PRUEBA DETECTADA - Usando 'APRO' como nombre del titular (requerido por Mercado Pago)")
         except Exception as test_card_error:
             print(f"[WARNING process_payment] Error verificando tarjeta de prueba: {test_card_error}")
         
@@ -396,28 +406,23 @@ async def process_payment(
                 # Si aún no hay nombre, usar un fallback inteligente
                 if not payer_first_name:
                     try:
-                        # SOLO en sandbox y SOLO para tarjetas de prueba, usar "APRO"
-                        # En producción, usar un valor genérico o el nombre del email
-                        if is_sandbox and is_test_card:
+                        # Para tarjetas de prueba (documento "Otro" con número "123456789"), usar "APRO"
+                        # Esto funciona tanto en sandbox como en producción
+                        if is_test_card:
                             payer_first_name = "APRO"
                             payer_last_name = ""
-                            print(f"[DEBUG process_payment] Usando 'APRO' como nombre del titular para tarjeta de prueba en sandbox")
+                            print(f"[DEBUG process_payment] ✅ Usando 'APRO' como nombre del titular para tarjeta de prueba (documento Otro/123456789)")
                         elif payer_email:
-                            # En producción o cuando no es tarjeta de prueba, usar el nombre del email
+                            # Si no es tarjeta de prueba, usar el nombre del email
                             email_name = payer_email.split("@")[0]
                             payer_first_name = email_name[:50]  # Limitar longitud
                             payer_last_name = email_name[:50] if not payer_last_name else payer_last_name
                             print(f"[DEBUG process_payment] Usando nombre del email como fallback: {payer_first_name} {payer_last_name}")
                         else:
                             # Último recurso: usar un valor genérico
-                            if is_sandbox:
-                                payer_first_name = "APRO"
-                                payer_last_name = ""
-                                print(f"[DEBUG process_payment] Usando 'APRO' como nombre del titular por defecto en sandbox")
-                            else:
-                                payer_first_name = "Usuario"
-                                payer_last_name = "Test"
-                                print(f"[WARNING process_payment] Usando nombre genérico. El nombre del titular puede estar vacío.")
+                            payer_first_name = "Usuario"
+                            payer_last_name = "Test"
+                            print(f"[WARNING process_payment] Usando nombre genérico. El nombre del titular puede estar vacío.")
                     except Exception as fallback_error:
                         print(f"[WARNING process_payment] Error en fallback de nombre: {fallback_error}")
                         # Fallback de emergencia
@@ -465,13 +470,68 @@ async def process_payment(
             payer_identification=payer_identification,
             payer_first_name=payer_first_name,
             payer_last_name=payer_last_name,
-            external_reference=order_id
+            external_reference=order_id,
+            device_id=device_id  # Device ID para mejorar aprobación
         )
         
         # Actualizar la orden con el payment_id
         order.payment_reference = str(payment.get("id"))
-        await db.commit()
-        await db.refresh(order)
+        
+        # Verificar el estado del pago inmediatamente
+        payment_status = payment.get("status")
+        payment_status_detail = payment.get("status_detail")
+        
+        print(f"[DEBUG process_payment] Estado del pago recibido: {payment_status} (detail: {payment_status_detail})")
+        
+        # Si el pago fue rechazado inmediatamente, actualizar el estado de la orden
+        if payment_status in ["rejected", "cancelled", "refunded"]:
+            print(f"❌ [process_payment] Pago rechazado inmediatamente. Actualizando orden {order_id} a 'cancelled'")
+            
+            # Cargar order_items ANTES de hacer commit (necesario para evitar MissingGreenlet)
+            from sqlalchemy.orm import selectinload
+            from shared.database.models import OrderItem
+            result = await db.execute(
+                select(OrderItem).where(OrderItem.order_id == order.id)
+            )
+            order_items = result.scalars().all()
+            
+            order.status = "cancelled"
+            await db.commit()
+            
+            # Liberar capacidad
+            service = PurchaseService()
+            for order_item in order_items:
+                await service.inventory_service.release_capacity(
+                    db, str(order_item.event_id), order_item.quantity, "payment_failed"
+                )
+            
+            await db.refresh(order)
+        elif payment_status == "approved":
+            # Si el pago fue aprobado inmediatamente, actualizar el estado
+            print(f"✅ [process_payment] Pago aprobado inmediatamente. Actualizando orden {order_id} a 'completed'")
+            order.status = "completed"
+            order.paid_at = datetime.utcnow()
+            await db.commit()
+            
+            # Generar tickets
+            service = PurchaseService()
+            try:
+                await service._generate_tickets(db, order, ticket_status="issued")
+                await db.commit()
+            except Exception as e:
+                await db.rollback()
+                print(f"Error generando tickets para orden {order.id}: {e}")
+                # Marcar orden como paid aunque falle la generación de tickets
+                order.status = "completed"
+                await db.commit()
+            
+            await db.refresh(order)
+        else:
+            # Si el pago está pendiente, solo guardar el payment_reference
+            # El webhook actualizará el estado cuando el pago se complete
+            print(f"⏳ [process_payment] Pago en estado '{payment_status}'. Esperando webhook para actualizar estado.")
+            await db.commit()
+            await db.refresh(order)
         
         return {
             "payment_id": payment.get("id"),

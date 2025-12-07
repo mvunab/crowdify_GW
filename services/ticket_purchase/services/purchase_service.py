@@ -628,15 +628,25 @@ class PurchaseService:
         # Mapear estados de order a estados de pago
         # Para notificaciones de tipo "order", el status puede ser "processed", "pending", etc.
         # Para notificaciones de tipo "payment", el status es "approved", "pending", etc.
+        print(f"🔔 [WEBHOOK] Tipo: {notification_type}, Estado recibido: {payment_status}, Resource ID: {resource_id}")
+        print(f"🔔 [WEBHOOK] External Reference: {external_reference}, Order ID: {order.id if order else 'NO ENCONTRADA'}")
+        
         if notification_type == "order":
             # Mapear estados de order a estados de pago
+            print(f"🔔 [WEBHOOK] Mapeando estado de order: {payment_status}")
             if payment_status == "processed":
                 payment_status = "approved"
+                print(f"🔔 [WEBHOOK] Estado mapeado a: approved")
             elif payment_status in ["expired", "failed", "canceled"]:
                 payment_status = "cancelled"
+                print(f"🔔 [WEBHOOK] Estado mapeado a: cancelled")
+            elif payment_status == "pending":
+                print(f"🔔 [WEBHOOK] Estado sigue siendo pending - el pago aún no se ha completado")
         
         # Actualizar estado según el pago
+        print(f"🔔 [WEBHOOK] Estado final a procesar: {payment_status}")
         if payment_status == "approved":
+            print(f"✅ [WEBHOOK] Pago aprobado! Actualizando orden {order.id} a 'completed'")
             order.status = "completed"  # Cambiar a "completed" según el modelo
             order.paid_at = datetime.utcnow()
             await db.flush()
@@ -661,6 +671,7 @@ class PurchaseService:
             
             return True
         elif payment_status in ["rejected", "cancelled", "refunded"]:
+            print(f"❌ [WEBHOOK] Pago rechazado/cancelado. Actualizando orden {order.id} a 'cancelled'")
             order.status = "cancelled"
             await db.commit()
             
@@ -672,6 +683,9 @@ class PurchaseService:
             
             return True
         
+        # Si el estado es "pending", el webhook se recibió pero el pago aún no está aprobado
+        print(f"⏳ [WEBHOOK] Estado '{payment_status}' - El pago aún está pendiente. No se actualiza la orden.")
+        print(f"⏳ [WEBHOOK] Esto es normal si el pago aún no se ha completado en Mercado Pago.")
         return False
     
     async def get_order_status(
