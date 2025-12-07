@@ -369,3 +369,36 @@ class OrderResponse(BaseModel):
 class OrdersListResponse(BaseModel):
     """Respuesta con lista de órdenes pendientes"""
     orders: List[OrderResponse]
+
+
+# ==================== MANUAL TICKETS ====================
+
+class BuyerInfo(BaseModel):
+    """Información del comprador para creación manual"""
+    first_name: str
+    last_name: str
+    email: EmailStr
+    document_type: Optional[str] = "RUT"  # Opcional, por defecto RUT
+    document_number: Optional[str] = ""  # Opcional
+
+
+class ManualTicketService(BaseModel):
+    """Servicio adicional para creación manual"""
+    service_id: str
+    quantity: int
+
+
+class CreateManualTicketsRequest(BaseModel):
+    """Request para crear tickets manualmente"""
+    event_id: str
+    buyer: BuyerInfo
+    quantity: int
+    services: Optional[List[ManualTicketService]] = None
+    notes: Optional[str] = None
+
+
+class CreateManualTicketsResponse(BaseModel):
+    """Respuesta al crear tickets manualmente"""
+    order_id: str
+    tickets_created: int
+    message: str = "Tickets creados exitosamente"

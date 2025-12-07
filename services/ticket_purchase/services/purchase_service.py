@@ -44,9 +44,11 @@ class PurchaseService:
         # Determinar método de pago PRIMERO
         payment_method = request.payment_method or "mercadopago"
         is_bank_transfer = payment_method == "bank_transfer"
+        is_stripe = payment_method == "stripe"
         
         print(f"[DEBUG SERVICE] Payment method recibido: {payment_method}")
         print(f"[DEBUG SERVICE] Is bank transfer: {is_bank_transfer}")
+        print(f"[DEBUG SERVICE] Is stripe: {is_stripe}")
         
         # Generar idempotency_key base (sin payment_method)
         base_idempotency_key = request.idempotency_key or self._generate_idempotency_key(request)
@@ -386,8 +388,8 @@ class PurchaseService:
         
         payment_link = None
         
-        # Si es transferencia bancaria, crear tickets inmediatamente con status "pending"
-        if is_bank_transfer:
+        # Si es transferencia bancaria o Stripe, crear tickets inmediatamente con status "pending"
+        if is_bank_transfer or is_stripe:
             try:
                 # Hacer flush para asegurar que order_items estén disponibles
                 await db.flush()
@@ -412,9 +414,9 @@ class PurchaseService:
                 
                 response = {
                     "order_id": str(order.id),
-                    "payment_link": None,  # No hay payment_link para transferencias
+                    "payment_link": None,  # No hay payment_link para transferencias/stripe
                     "status": "pending",
-                    "payment_method": "bank_transfer"
+                    "payment_method": payment_method  # bank_transfer o stripe
                 }
                 
                 # Guardar en cache para idempotencia

@@ -32,7 +32,7 @@ class AdminOrdersService:
             .where(
                 and_(
                     Order.status == "pending",
-                    Order.payment_provider == "bank_transfer"
+                    Order.payment_provider.in_(["bank_transfer", "stripe"])
                 )
             )
             .order_by(Order.created_at.desc())

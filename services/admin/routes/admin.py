@@ -42,7 +42,9 @@ from services.admin.models.admin import (
     GlobalChildTicketsResponse,
     OrdersListResponse,
     OrderResponse,
-    TicketDetailResponse
+    TicketDetailResponse,
+    CreateManualTicketsRequest,
+    CreateManualTicketsResponse
 )
 from services.admin.services.organizer_service import OrganizerService
 from services.admin.services.user_management_service import UserManagementService
@@ -50,6 +52,7 @@ from services.admin.services.stats_service import StatsService
 from services.admin.services.admin_events_service import AdminEventsService
 from services.admin.services.tickets_admin_service import TicketsAdminService
 from services.admin.services.admin_orders_service import AdminOrdersService
+from services.admin.services.manual_tickets_service import ManualTicketsService
 from shared.database.models import (
     Ticket as TicketModel,
     TicketChildDetail as TicketChildDetailsModel,
@@ -898,7 +901,64 @@ async def confirm_order(
     except HTTPException:
         raise
     except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error al confirmar orden: {str(e)}"
+            )
+
+
+# ==================== MANUAL TICKETS ====================
+
+@router.post("/manual-tickets", response_model=CreateManualTicketsResponse, status_code=status.HTTP_201_CREATED)
+async def create_manual_tickets(
+    request: CreateManualTicketsRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict = Depends(get_current_admin)
+):
+    """
+    Crear tickets manualmente desde el admin
+    
+    Útil para pagos realizados fuera del sistema (ej: Stripe internacional)
+    
+    Requiere autenticación de admin
+    """
+    service = ManualTicketsService()
+
+    try:
+        result = await service.create_manual_tickets(
+            db=db,
+            event_id=request.event_id,
+            buyer={
+                "first_name": request.buyer.first_name,
+                "last_name": request.buyer.last_name,
+                "email": request.buyer.email,
+                "document_type": request.buyer.document_type,
+                "document_number": request.buyer.document_number,
+            },
+            quantity=request.quantity,
+            services=[
+                {
+                    "service_id": s.service_id,
+                    "quantity": s.quantity
+                }
+                for s in (request.services or [])
+            ] if request.services else None,
+            notes=request.notes
+        )
+
+        return CreateManualTicketsResponse(
+            order_id=result["order_id"],
+            tickets_created=result["tickets_created"],
+            message=f"Se crearon {result['tickets_created']} ticket(s) exitosamente"
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al confirmar orden: {str(e)}"
+            detail=f"Error al crear tickets manualmente: {str(e)}"
         )
