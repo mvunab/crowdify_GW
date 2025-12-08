@@ -918,7 +918,7 @@ async def create_manual_tickets(
     """
     Crear tickets manualmente desde el admin
     
-    Útil para pagos realizados fuera del sistema (ej: Stripe internacional)
+    Útil para pagos realizados fuera del sistema
     
     Requiere autenticación de admin
     """

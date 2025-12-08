@@ -161,6 +161,267 @@ async def mercado_pago_webhook(
         return {"status": "error", "message": str(e)}
 
 
+@router.post("/payku-webhook")
+async def payku_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Webhook para recibir notificaciones de Payku
+    
+    No requiere autenticación (Payku valida la firma)
+    """
+    service = PurchaseService()
+    
+    try:
+        # Obtener body
+        data = await request.json()
+        
+        print(f"🔔 [WEBHOOK PAYKU] Webhook recibido!")
+        print(f"🔔 [WEBHOOK PAYKU] Body: {data}")
+        
+        # Procesar webhook de Payku
+        payku_service = service.payku_service
+        webhook_info = payku_service.process_webhook(data)
+        
+        print(f"🔔 [WEBHOOK PAYKU] Webhook procesado: {webhook_info}")
+        
+        # Obtener order_id del webhook
+        order_id = webhook_info.get("order_id")
+        if not order_id:
+            print("⚠️  [WEBHOOK PAYKU] No se encontró order_id en el webhook")
+            return {"status": "ignored", "message": "No order_id found"}
+        
+        # Buscar orden
+        from sqlalchemy import select
+        from shared.database.models import Order
+        stmt = select(Order).where(Order.id == order_id)
+        result = await db.execute(stmt)
+        order = result.scalar_one_or_none()
+        
+        if not order:
+            print(f"⚠️  [WEBHOOK PAYKU] Orden {order_id} no encontrada")
+            return {"status": "ignored", "message": f"Order {order_id} not found"}
+        
+        # Actualizar estado según el webhook
+        status = webhook_info.get("status")
+        print(f"🔔 [WEBHOOK PAYKU] Estado recibido: {status}")
+        
+        if status == "approved":
+            order_id_str = str(order.id)  # Guardar ID antes del try para evitar errores de SQLAlchemy async
+            print(f"✅ [WEBHOOK PAYKU] Pago aprobado! Actualizando orden {order_id_str} a 'completed'")
+            order.status = "completed"
+            order.paid_at = datetime.utcnow()
+            await db.flush()
+            
+            # Intentar recuperar attendees del cache antes de generar tickets
+            attendees_data = None
+            if order.idempotency_key:
+                from shared.cache.redis_client import cache_get
+                attendees_cache_key = f"purchase:attendees:{order.idempotency_key}"
+                attendees_data = await cache_get(attendees_cache_key)
+                print(f"🔍 [WEBHOOK PAYKU] Buscando attendees en cache: {attendees_cache_key}")
+                print(f"🔍 [WEBHOOK PAYKU] Attendees encontrados: {attendees_data is not None}")
+                if attendees_data:
+                    print(f"🔍 [WEBHOOK PAYKU] Attendees count: {len(attendees_data)}")
+            
+            # Generar tickets después de pago exitoso
+            try:
+                await service._generate_tickets(db, order, ticket_status="issued", attendees_data=attendees_data)
+                await db.commit()
+                print(f"✅ [WEBHOOK PAYKU] Tickets generados exitosamente para orden {order_id_str}")
+            except ValueError as e:
+                # Si falla por falta de attendees, esto es un error crítico
+                await db.rollback()
+                import traceback
+                print(f"❌ [WEBHOOK PAYKU] ERROR CRÍTICO: No se encontraron datos de attendees para orden {order_id_str}")
+                print(f"❌ [WEBHOOK PAYKU] Error: {str(e)}")
+                print(f"❌ [WEBHOOK PAYKU] Idempotency key: {order.idempotency_key}")
+                print(f"❌ [WEBHOOK PAYKU] Traceback: {traceback.format_exc()}")
+                # Marcar orden como paid pero sin tickets - requiere intervención manual
+                order.status = "completed"
+                await db.commit()
+                print(f"⚠️  [WEBHOOK PAYKU] Orden {order_id_str} marcada como completed SIN TICKETS.")
+                print(f"⚠️  [WEBHOOK PAYKU] REQUIERE GENERACIÓN MANUAL DE TICKETS.")
+            except Exception as e:
+                await db.rollback()
+                # Log error pero no fallar el webhook
+                import traceback
+                print(f"❌ [WEBHOOK PAYKU] Error generando tickets para orden {order_id_str}: {str(e)}")
+                print(f"❌ [WEBHOOK PAYKU] Traceback: {traceback.format_exc()}")
+                # Marcar orden como paid aunque falle la generación de tickets
+                order.status = "completed"
+                await db.commit()
+                print(f"⚠️  [WEBHOOK PAYKU] Orden {order_id_str} marcada como completed sin tickets. Se pueden generar manualmente.")
+            
+            return {"status": "ok", "message": "Payment approved and tickets generated"}
+            
+        elif status in ["rejected", "cancelled"]:
+            print(f"❌ [WEBHOOK PAYKU] Pago rechazado/cancelado. Actualizando orden {order.id} a 'cancelled'")
+            order.status = "cancelled"
+            await db.commit()
+            
+            # Liberar capacidad
+            for order_item in order.order_items:
+                await service.inventory_service.release_capacity(
+                    db, str(order_item.event_id), order_item.quantity, "payment_failed"
+                )
+            
+            return {"status": "ok", "message": "Payment cancelled"}
+        
+        # Si el estado es "pending", el webhook se recibió pero el pago aún no está aprobado
+        print(f"⏳ [WEBHOOK PAYKU] Estado '{status}' - El pago aún está pendiente.")
+        return {"status": "ignored", "message": f"Payment still {status}"}
+        
+    except Exception as e:
+        # Log error pero retornar 200 para que Payku no reintente inmediatamente
+        print(f"Error procesando webhook de Payku: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/{order_id}/verify-payku")
+async def verify_payku_payment(
+    order_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Verificar manualmente el estado de una transacción Payku
+    Útil cuando el webhook no llega o hay problemas
+    """
+    service = PurchaseService()
+    
+    try:
+        # Buscar orden
+        from sqlalchemy import select
+        from shared.database.models import Order
+        stmt = select(Order).where(Order.id == order_id)
+        result = await db.execute(stmt)
+        order = result.scalar_one_or_none()
+        
+        if not order:
+            raise HTTPException(status_code=404, detail="Orden no encontrada")
+        
+        if order.payment_provider != "payku":
+            raise HTTPException(status_code=400, detail="Esta orden no es de Payku")
+        
+        if not order.payment_reference:
+            raise HTTPException(status_code=400, detail="No hay payment_reference para verificar")
+        
+        # Verificar estado en Payku
+        payku_service = service.payku_service
+        transaction_data = payku_service.verify_transaction(order.payment_reference)
+        
+        print(f"🔍 [VERIFY PAYKU] Estado de transacción {order.payment_reference}: {transaction_data}")
+        
+        # Procesar según el estado
+        # Payku puede devolver el estado en diferentes formatos
+        status = transaction_data.get("status", "").lower()
+        
+        # También verificar en payment.status si existe
+        payment_data = transaction_data.get("payment", {})
+        if payment_data and payment_data.get("status"):
+            status = payment_data.get("status", "").lower()
+        
+        print(f"🔍 [VERIFY PAYKU] Estado procesado: {status}")
+        print(f"🔍 [VERIFY PAYKU] Transaction data completo: {transaction_data}")
+        
+        # Mapear estados de Payku
+        if status in ["success", "approved", "completado", "completed"]:
+            # Pago exitoso - actualizar orden
+            if order.status != "completed":
+                order.status = "completed"
+                order.paid_at = datetime.utcnow()
+                await db.flush()
+                
+                # Intentar recuperar attendees del cache
+                attendees_data = None
+                if order.idempotency_key:
+                    from shared.cache.redis_client import cache_get
+                    attendees_cache_key = f"purchase:attendees:{order.idempotency_key}"
+                    attendees_data = await cache_get(attendees_cache_key)
+                    print(f"🔍 [VERIFY PAYKU] Attendees del cache: {attendees_data}")
+                
+                # Si no hay attendees en cache, intentar obtenerlos de otra forma
+                # Por ahora, generar tickets sin attendees (usará valores por defecto)
+                if not attendees_data:
+                    print(f"⚠️  [VERIFY PAYKU] No se encontraron attendees en cache. Intentando generar tickets sin datos específicos...")
+                    # Intentar generar tickets sin attendees_data - el método debería manejar esto
+                    try:
+                        await service._generate_tickets(db, order, ticket_status="issued")
+                    except ValueError as e:
+                        # Si falla por falta de attendees, crear tickets básicos
+                        print(f"⚠️  [VERIFY PAYKU] Error generando tickets: {e}")
+                        print(f"⚠️  [VERIFY PAYKU] Creando tickets básicos sin datos de attendees...")
+                        # Crear tickets básicos usando los order_items
+                        from shared.database.models import OrderItem, Ticket, TicketType
+                        from shared.utils.qr_generator import generate_qr_signature
+                        import uuid
+                        
+                        stmt_items = select(OrderItem).where(OrderItem.order_id == order.id)
+                        result_items = await db.execute(stmt_items)
+                        order_items = result_items.scalars().all()
+                        
+                        for order_item in order_items:
+                            # Obtener tipo de ticket
+                            stmt_type = select(TicketType).where(TicketType.id == order_item.ticket_type_id)
+                            result_type = await db.execute(stmt_type)
+                            ticket_type = result_type.scalar_one_or_none()
+                            
+                            if not ticket_type:
+                                continue
+                            
+                            # Crear tickets básicos
+                            for i in range(order_item.quantity):
+                                ticket_id = uuid.uuid4()
+                                qr_signature = generate_qr_signature(str(ticket_id))
+                                ticket = Ticket(
+                                    id=ticket_id,
+                                    order_item_id=order_item.id,
+                                    event_id=order_item.event_id,
+                                    holder_first_name="Asistente",
+                                    holder_last_name=f"#{i+1}",
+                                    holder_email=None,
+                                    is_child=ticket_type.is_child or False,
+                                    qr_signature=qr_signature,
+                                    status="issued",
+                                    issued_at=datetime.utcnow()
+                                )
+                                db.add(ticket)
+                        
+                        await db.flush()
+                        print(f"✅ [VERIFY PAYKU] Tickets básicos creados exitosamente")
+                
+                await db.commit()
+                
+                return {"status": "ok", "message": "Pago verificado y tickets generados", "order_status": "completed"}
+            else:
+                return {"status": "ok", "message": "Pago ya estaba completado", "order_status": "completed"}
+        elif status == "failed":
+            # Pago rechazado
+            if order.status != "cancelled":
+                order.status = "cancelled"
+                await db.commit()
+                
+                # Liberar capacidad
+                for order_item in order.order_items:
+                    await service.inventory_service.release_capacity(
+                        db, str(order_item.event_id), order_item.quantity, "payment_failed"
+                    )
+            
+            return {"status": "ok", "message": "Pago rechazado", "order_status": "cancelled"}
+        else:
+            # Pendiente
+            return {"status": "pending", "message": "Pago aún pendiente", "order_status": order.status}
+            
+    except Exception as e:
+        print(f"Error verificando pago Payku: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/{order_id}/status", response_model=OrderStatusResponse)
 async def get_order_status(
     order_id: str,

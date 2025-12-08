@@ -13,6 +13,7 @@ from shared.utils.qr_generator import generate_qr_signature
 from services.ticket_purchase.models.purchase import PurchaseRequest, AttendeeData
 from services.ticket_purchase.services.inventory_service import InventoryService
 from services.ticket_purchase.services.mercado_pago_service import MercadoPagoService
+from services.ticket_purchase.services.payku_service import PaykuService
 from shared.cache.redis_client import cache_get, cache_set
 
 
@@ -22,6 +23,7 @@ class PurchaseService:
     def __init__(self):
         self.inventory_service = InventoryService()
         self._mercado_pago_service = None
+        self._payku_service = None
     
     @property
     def mercado_pago_service(self):
@@ -29,6 +31,13 @@ class PurchaseService:
         if self._mercado_pago_service is None:
             self._mercado_pago_service = MercadoPagoService()
         return self._mercado_pago_service
+    
+    @property
+    def payku_service(self):
+        """Lazy initialization de PaykuService solo cuando se necesita"""
+        if self._payku_service is None:
+            self._payku_service = PaykuService()
+        return self._payku_service
     
     async def create_purchase(
         self,
@@ -44,11 +53,11 @@ class PurchaseService:
         # Determinar método de pago PRIMERO
         payment_method = request.payment_method or "mercadopago"
         is_bank_transfer = payment_method == "bank_transfer"
-        is_stripe = payment_method == "stripe"
+        is_payku = payment_method == "payku"
         
         print(f"[DEBUG SERVICE] Payment method recibido: {payment_method}")
         print(f"[DEBUG SERVICE] Is bank transfer: {is_bank_transfer}")
-        print(f"[DEBUG SERVICE] Is stripe: {is_stripe}")
+        print(f"[DEBUG SERVICE] Is payku: {is_payku}")
         
         # Generar idempotency_key base (sin payment_method)
         base_idempotency_key = request.idempotency_key or self._generate_idempotency_key(request)
@@ -68,15 +77,52 @@ class PurchaseService:
         cached = await cache_get(cache_key)
         if cached:
             print(f"[DEBUG SERVICE] Orden encontrada en cache: {cached}")
-            return cached
+            
+            # Si es Payku, verificar que la transacción aún sea válida
+            if is_payku and cached.get("transaction_id"):
+                try:
+                    transaction_data = self.payku_service.verify_transaction(cached["transaction_id"])
+                    transaction_status = transaction_data.get("status", "").lower()
+                    
+                    print(f"[DEBUG SERVICE] Estado de transacción Payku en cache: {transaction_status}")
+                    
+                    # Si la transacción ya fue pagada o rechazada, invalidar cache y continuar
+                    if transaction_status in ["success", "completed", "approved", "failed", "rejected", "cancelled"]:
+                        print(f"[WARNING] Transacción Payku en cache ya fue procesada ({transaction_status}). Invalidando cache...")
+                        from shared.cache.redis_client import cache_delete
+                        await cache_delete(cache_key)
+                        cached = None  # Continuar con la creación/verificación normal
+                    # Si está pendiente, usar el cache
+                    elif transaction_status in ["pending"]:
+                        print(f"[DEBUG SERVICE] Transacción Payku aún pendiente. Usando cache.")
+                        return cached
+                except Exception as e:
+                    print(f"[WARNING] Error verificando transacción Payku en cache: {str(e)}")
+                    # Si falla la verificación, invalidar cache por seguridad
+                    from shared.cache.redis_client import cache_delete
+                    await cache_delete(cache_key)
+                    cached = None
+            
+            # Si no es Payku o el cache es válido, retornar
+            if cached:
+                return cached
         
         # Verificar en la base de datos si existe una orden con ese idempotency_key Y mismo payment_method
-        stmt_existing = select(Order).where(
-            Order.idempotency_key == idempotency_key,
-            Order.payment_provider == payment_method
-        )
-        result_existing = await db.execute(stmt_existing)
-        existing_order = result_existing.scalar_one_or_none()
+        try:
+            stmt_existing = select(Order).where(
+                Order.idempotency_key == idempotency_key,
+                Order.payment_provider == payment_method
+            )
+            result_existing = await db.execute(stmt_existing)
+            existing_order = result_existing.scalar_one_or_none()
+        except Exception as db_error:
+            # Error de conexión a la base de datos
+            error_msg = str(db_error)
+            print(f"[ERROR SERVICE] ❌ Error conectando a la base de datos: {error_msg}")
+            print(f"[ERROR SERVICE] ❌ Esto puede ser un problema temporal de red o la base de datos está caída")
+            print(f"[ERROR SERVICE] ❌ Verifica que la base de datos esté disponible y que DATABASE_URL sea correcta")
+            # Re-lanzar el error para que el endpoint retorne 500
+            raise Exception(f"Error de conexión a la base de datos: {error_msg}. Verifica que la base de datos esté disponible.")
         
         if existing_order:
             print(f"[DEBUG SERVICE] Orden existente encontrada: {existing_order.id}")
@@ -124,7 +170,95 @@ class PurchaseService:
                 
                 # Retornar la orden existente (solo si el método de pago coincide)
                 payment_link = None
-                if existing_order.payment_provider == "mercadopago":
+                
+                # Si la orden ya está completada, crear una nueva orden (permitir múltiples compras)
+                if existing_order and existing_order.status == "completed":
+                    print(f"[DEBUG SERVICE] Orden {existing_order.id} ya está completada. Creando nueva orden para nueva compra...")
+                    # Invalidar cache y continuar con la creación de una nueva orden
+                    from shared.cache.redis_client import cache_delete
+                    await cache_delete(cache_key)
+                    # Generar nuevo idempotency_key para la nueva orden (agregar timestamp)
+                    import time
+                    timestamp = int(time.time() * 1000)  # Timestamp en milisegundos
+                    idempotency_key = hashlib.sha256(f"{base_idempotency_key}:{payment_method}:{timestamp}".encode()).hexdigest()
+                    cache_key = f"purchase:idempotency:{idempotency_key}"  # Actualizar cache_key también
+                    print(f"[DEBUG SERVICE] Nuevo idempotency_key generado: {idempotency_key}")
+                    existing_order = None  # Continuar con la creación de una nueva orden
+                
+                # Si existing_order es None después de invalidar, salir del bloque y crear nueva orden
+                if existing_order is None:
+                    print(f"[DEBUG SERVICE] No hay orden existente o fue invalidada. Continuando con creación de nueva orden...")
+                    # Salir del bloque if existing_order para continuar con la creación de una nueva orden
+                    # El código después de este bloque if existing_order: creará una nueva orden
+                elif existing_order.payment_provider == "payku":
+                    # Para Payku, verificar si la transacción existe y su estado
+                    if existing_order.payment_reference:
+                        try:
+                            # Verificar estado de la transacción en Payku
+                            transaction_data = self.payku_service.verify_transaction(existing_order.payment_reference)
+                            transaction_status = transaction_data.get("status", "").lower()
+                            
+                            print(f"[DEBUG SERVICE] Estado de transacción Payku existente: {transaction_status}")
+                            
+                            # Si la transacción ya fue pagada, rechazada o cancelada, invalidar orden y crear nueva
+                            if transaction_status in ["success", "completed", "approved", "failed", "rejected", "cancelled"]:
+                                print(f"[WARNING] Transacción Payku {existing_order.payment_reference} ya fue procesada ({transaction_status}). Invalidando orden y creando nueva...")
+                                # Invalidar cache y orden existente para crear una nueva orden
+                                from shared.cache.redis_client import cache_delete
+                                await cache_delete(cache_key)
+                                # Generar nuevo idempotency_key para la nueva orden (agregar timestamp)
+                                import time
+                                timestamp = int(time.time() * 1000)  # Timestamp en milisegundos
+                                idempotency_key = hashlib.sha256(f"{base_idempotency_key}:{payment_method}:{timestamp}".encode()).hexdigest()
+                                cache_key = f"purchase:idempotency:{idempotency_key}"  # Actualizar cache_key también
+                                print(f"[DEBUG SERVICE] Nuevo idempotency_key generado: {idempotency_key}")
+                                existing_order = None  # Forzar creación de nueva orden
+                                payment_link = None
+                            else:
+                                # Transacción pendiente, pero Payku no devuelve el payment_link en verify_transaction
+                                # Necesitamos crear una nueva transacción con un nuevo order_id
+                                print(f"[WARNING] Transacción Payku pendiente pero no tenemos payment_link. Invalidando orden para crear nueva...")
+                                from shared.cache.redis_client import cache_delete
+                                await cache_delete(cache_key)
+                                # Generar nuevo idempotency_key para la nueva orden (agregar timestamp)
+                                import time
+                                timestamp = int(time.time() * 1000)  # Timestamp en milisegundos
+                                idempotency_key = hashlib.sha256(f"{base_idempotency_key}:{payment_method}:{timestamp}".encode()).hexdigest()
+                                cache_key = f"purchase:idempotency:{idempotency_key}"  # Actualizar cache_key también
+                                print(f"[DEBUG SERVICE] Nuevo idempotency_key generado: {idempotency_key}")
+                                existing_order = None  # Forzar creación de nueva orden
+                                payment_link = None
+                        except Exception as e:
+                            print(f"[WARNING] No se pudo verificar transacción Payku existente: {str(e)}")
+                            print(f"[WARNING] Invalidando orden y creando nueva...")
+                            # Si falla la verificación, invalidar y crear nueva orden
+                            from shared.cache.redis_client import cache_delete
+                            await cache_delete(cache_key)
+                            # Generar nuevo idempotency_key para la nueva orden (agregar timestamp)
+                            import time
+                            timestamp = int(time.time() * 1000)  # Timestamp en milisegundos
+                            idempotency_key = hashlib.sha256(f"{base_idempotency_key}:{payment_method}:{timestamp}".encode()).hexdigest()
+                            cache_key = f"purchase:idempotency:{idempotency_key}"  # Actualizar cache_key también
+                            print(f"[DEBUG SERVICE] Nuevo idempotency_key generado: {idempotency_key}")
+                            existing_order = None
+                            payment_link = None
+                    
+                    # Si no tiene payment_reference, invalidar y crear nueva orden
+                    if not existing_order or not payment_link:
+                        if existing_order:
+                            print(f"[WARNING] Orden existente sin payment_reference válido. Invalidando y creando nueva orden...")
+                            from shared.cache.redis_client import cache_delete
+                            await cache_delete(cache_key)
+                            # Generar nuevo idempotency_key para la nueva orden (agregar timestamp)
+                            import time
+                            timestamp = int(time.time() * 1000)  # Timestamp en milisegundos
+                            idempotency_key = hashlib.sha256(f"{base_idempotency_key}:{payment_method}:{timestamp}".encode()).hexdigest()
+                            cache_key = f"purchase:idempotency:{idempotency_key}"  # Actualizar cache_key también
+                            print(f"[DEBUG SERVICE] Nuevo idempotency_key generado: {idempotency_key}")
+                            existing_order = None
+                        payment_link = None
+                
+                elif existing_order.payment_provider == "mercadopago":
                     if existing_order.payment_reference:
                         # Si tiene payment_reference, obtener el init_point de la preferencia
                         try:
@@ -222,13 +356,16 @@ class PurchaseService:
                             # para que el frontend pueda manejar el error
                             payment_link = None
                 
-                return {
-                    "order_id": str(existing_order.id),
-                    "payment_link": payment_link,
-                    "preference_id": existing_order.payment_reference,
-                    "status": existing_order.status,
-                    "payment_method": existing_order.payment_provider or "mercadopago"
-                }
+                # Solo retornar si existing_order no es None
+                if existing_order is not None:
+                    return {
+                        "order_id": str(existing_order.id),
+                        "payment_link": payment_link,
+                        "preference_id": existing_order.payment_reference,
+                        "status": existing_order.status,
+                        "payment_method": existing_order.payment_provider or "mercadopago"
+                    }
+                # Si existing_order es None, continuar con la creación de una nueva orden
         
         # Verificar que el evento existe
         stmt_event = select(Event).where(Event.id == request.event_id)
@@ -371,11 +508,15 @@ class PurchaseService:
                 "child_details": child_details_dict
             })
         
-        # Guardar attendees en cache para recuperarlos después del pago (solo para Mercado Pago)
-        # Para transferencias bancarias, creamos tickets inmediatamente
+        # Guardar attendees en cache para recuperarlos después del pago
+        # Necesario para pagos asíncronos (Mercado Pago y Payku) donde el webhook llega después
+        # Para transferencias bancarias, creamos tickets inmediatamente, no necesitamos cache
         if not is_bank_transfer and request.idempotency_key:
             attendees_cache_key = f"purchase:attendees:{request.idempotency_key}"
             await cache_set(attendees_cache_key, attendees_data, expire=86400)  # 24 horas
+            print(f"[DEBUG SERVICE] ✅ Datos de attendees guardados en cache: {attendees_cache_key}")
+            print(f"[DEBUG SERVICE]   - Attendees count: {len(attendees_data)}")
+            print(f"[DEBUG SERVICE]   - Payment method: {payment_method}")
         
         # Reservar capacidad
         reserved = await self.inventory_service.reserve_capacity(
@@ -388,8 +529,8 @@ class PurchaseService:
         
         payment_link = None
         
-        # Si es transferencia bancaria o Stripe, crear tickets inmediatamente con status "pending"
-        if is_bank_transfer or is_stripe:
+        # Si es transferencia bancaria, crear tickets inmediatamente con status "pending"
+        if is_bank_transfer:
             try:
                 # Hacer flush para asegurar que order_items estén disponibles
                 await db.flush()
@@ -414,9 +555,9 @@ class PurchaseService:
                 
                 response = {
                     "order_id": str(order.id),
-                    "payment_link": None,  # No hay payment_link para transferencias/stripe
+                    "payment_link": None,  # No hay payment_link para transferencias
                     "status": "pending",
-                    "payment_method": payment_method  # bank_transfer o stripe
+                    "payment_method": payment_method  # bank_transfer
                 }
                 
                 # Guardar en cache para idempotencia
@@ -435,6 +576,75 @@ class PurchaseService:
                 )
                 await db.rollback()
                 raise ValueError(f"Error creando tickets: {str(e)}")
+        
+        # Si es Payku, crear transacción de pago
+        elif is_payku:
+            try:
+                print(f"[DEBUG] Creando transacción de Payku para orden {order.id}")
+                print(f"[DEBUG] Payment method recibido: {payment_method}")
+                
+                # Obtener información del primer attendee para la transacción
+                payer_email = None
+                if request.attendees and len(request.attendees) > 0:
+                    first_attendee = request.attendees[0]
+                    payer_email = first_attendee.email
+                
+                if not payer_email:
+                    raise ValueError("Se requiere un email para crear la transacción de Payku")
+                
+                # Crear descripción del pago
+                subject = f"Compra de tickets - {event.name}"
+                
+                # Crear transacción con Payku
+                transaction = self.payku_service.create_transaction(
+                    order_id=str(order.id),
+                    email=payer_email,
+                    amount=total,
+                    subject=subject,
+                    currency=order.currency or "CLP"
+                )
+                
+                print(f"[DEBUG] Transacción creada: {transaction}")
+                
+                # Validar que la transacción tenga los campos necesarios
+                if not transaction.get("payment_link"):
+                    raise ValueError("La transacción no tiene payment_link")
+                
+                order.payment_reference = transaction.get("transaction_id")
+                payment_link = transaction["payment_link"]
+                
+                print(f"[DEBUG] Payment link obtenido: {payment_link}")
+                print(f"[DEBUG] Transaction ID obtenido: {transaction.get('transaction_id')}")
+                
+            except Exception as e:
+                # Si falla la creación de transacción, liberar capacidad y rollback
+                import traceback
+                error_trace = traceback.format_exc()
+                print(f"[ERROR] Error creando transacción de pago: {str(e)}")
+                print(f"[ERROR] Traceback: {error_trace}")
+                await self.inventory_service.release_capacity(
+                    db, request.event_id, total_quantity, "payment_creation_failed"
+                )
+                await db.rollback()
+                raise ValueError(f"Error creando transacción de pago: {str(e)}")
+            
+            await db.commit()
+            await db.refresh(order)
+            
+            response = {
+                "order_id": str(order.id),
+                "payment_link": payment_link,
+                "transaction_id": transaction.get("transaction_id"),
+                "status": "pending",
+                "payment_method": "payku"
+            }
+            
+            print(f"[DEBUG] Response final: {response}")
+            
+            # Guardar en cache para idempotencia
+            await cache_set(cache_key, response, expire=3600)
+            
+            return response
         
         # Si es Mercado Pago, crear preferencia de pago
         else:

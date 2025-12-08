@@ -21,7 +21,15 @@ class Settings(BaseSettings):
     MERCADOPAGO_PUBLIC_KEY: str = ""
     MERCADOPAGO_WEBHOOK_SECRET: str = ""
     MERCADOPAGO_ENVIRONMENT: str = "sandbox"  # sandbox o production
-    APP_BASE_URL: str = "http://localhost:5173"  # URL del frontend para redirects
+    
+    # Payku Configuration
+    PAYKU_TOKEN_PUBLICO: str = ""
+    PAYKU_TOKEN_PRIVADO: str = ""
+    PAYKU_ENVIRONMENT: str = "sandbox"  # sandbox o production
+    
+    APP_BASE_URL: str = "http://localhost:3000"  # URL del frontend para redirects
+    FRONTEND_URL: str = ""  # URL del frontend (puede ser ngrok o producción)
+    FRONTEND_PRODUCTION_URL: str = "https://crodify.vercel.app"  # URL de producción del frontend (Vercel)
     NGROK_URL: str = ""  # URL de ngrok para webhooks en desarrollo (ej: https://xxx.ngrok-free.dev)
 
     class Config:
