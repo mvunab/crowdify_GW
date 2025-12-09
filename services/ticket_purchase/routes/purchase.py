@@ -237,13 +237,23 @@ async def payku_webhook(
                     order.attendees_data = attendees_data
                     await db.flush()
             
-            # Generar tickets después de pago exitoso
+            # OPTIMIZACIÓN: Generar tickets en background (no bloquea respuesta del webhook)
             # CRÍTICO: Los tickets SIEMPRE deben crearse con los datos del formulario
             try:
                 if attendees_data:
-                    await service._generate_tickets(db, order, ticket_status="issued", attendees_data=attendees_data)
+                    # Generar tickets de forma asíncrona en background
+                    from asyncio import create_task
+                    create_task(
+                        service._generate_tickets_background(
+                            order_id_str,
+                            attendees_data
+                        )
+                    )
+                    print(f"🚀 [WEBHOOK PAYKU] Iniciando generación de tickets en background para orden {order_id_str}")
+                    # Responder inmediatamente sin esperar generación de tickets
                     await db.commit()
-                    print(f"✅ [WEBHOOK PAYKU] Tickets generados exitosamente con datos del formulario para orden {order_id_str}")
+                    await db.refresh(order)
+                    print(f"✅ [WEBHOOK PAYKU] Orden actualizada, tickets se generarán en background")
                 else:
                     # Si no hay attendees, esto es un error crítico - NO crear tickets genéricos
                     raise ValueError(

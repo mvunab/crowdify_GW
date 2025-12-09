@@ -927,12 +927,68 @@ class PurchaseService:
         
         # Si el estado es "pending" y es una orden de Payku, verificar activamente con Payku
         if order.status == "pending" and order.payment_provider == "payku" and order.payment_reference:
+            # OPTIMIZACIÓN: Verificar cache primero para evitar consultas repetidas a Payku
+            cache_key = f"payku_verify:{order.payment_reference}"
+            cached_result = None
+            
+            try:
+                cached_result = await cache_get(cache_key)
+                if cached_result:
+                    import json
+                    from datetime import datetime
+                    cached_data = json.loads(cached_result) if isinstance(cached_result, str) else cached_result
+                    cache_timestamp_str = cached_data.get('timestamp', '')
+                    
+                    if cache_timestamp_str:
+                        try:
+                            cache_timestamp = datetime.fromisoformat(cache_timestamp_str.replace('Z', '+00:00'))
+                            cache_age = (datetime.utcnow() - cache_timestamp.replace(tzinfo=None)).total_seconds()
+                            
+                            # Si el cache es reciente (< 30 segundos), usar cache
+                            if cache_age < 30:
+                                print(f"🔍 [CACHE] Usando cache de verificación Payku para {order.payment_reference} (age: {cache_age:.1f}s)")
+                                # No consultar Payku, usar estado local
+                                await db.refresh(order)
+                                return {
+                                    "order_id": str(order.id),
+                                    "status": order.status,
+                                    "total": float(order.total),
+                                    "currency": order.currency,
+                                    "payment_provider": order.payment_provider,
+                                    "payment_reference": order.payment_reference,
+                                    "created_at": order.created_at,
+                                    "paid_at": order.paid_at,
+                                    "attendees_data": order.attendees_data
+                                }
+                        except Exception as cache_parse_error:
+                            print(f"⚠️  [CACHE] Error parseando timestamp del cache: {cache_parse_error}")
+                            # Continuar con verificación normal
+            except Exception as cache_error:
+                print(f"⚠️  [CACHE] Error leyendo cache: {cache_error}")
+                # Continuar con verificación normal
+            
+            # Si llegamos aquí, no hay cache válido o expiró, consultar Payku
             try:
                 print(f"🔍 [get_order_status] Verificando estado en Payku para orden {order_id}")
                 print(f"🔍 [get_order_status] Transaction ID: {order.payment_reference}")
                 
                 # Consultar estado en Payku
                 transaction_data = self.payku_service.verify_transaction(order.payment_reference)
+                
+                # OPTIMIZACIÓN: Guardar resultado en cache por 30 segundos
+                try:
+                    import json
+                    from datetime import datetime
+                    cache_data = {
+                        "status": transaction_data.get("status", "").lower(),
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    from shared.cache.redis_client import cache_set
+                    await cache_set(cache_key, json.dumps(cache_data), expire=30)
+                    print(f"🔍 [CACHE] Resultado de verificación Payku guardado en cache por 30s")
+                except Exception as cache_set_error:
+                    print(f"⚠️  [CACHE] Error guardando cache: {cache_set_error}")
+                    # No es crítico, continuar
                 
                 print(f"🔍 [get_order_status] Respuesta de Payku: {transaction_data}")
                 
@@ -995,13 +1051,23 @@ class PurchaseService:
                                 order.attendees_data = attendees_data
                                 await db.flush()
                         
-                        # Generar tickets después de pago exitoso
+                        # OPTIMIZACIÓN: Generar tickets en background (no bloquea respuesta)
                         # CRÍTICO: Los tickets SIEMPRE deben crearse con los datos del formulario
                         try:
                             if attendees_data:
-                                await self._generate_tickets(db, order, ticket_status="issued", attendees_data=attendees_data)
+                                # Generar tickets de forma asíncrona en background
+                                from asyncio import create_task
+                                create_task(
+                                    self._generate_tickets_background(
+                                        str(order.id),
+                                        attendees_data
+                                    )
+                                )
+                                print(f"🚀 [get_order_status] Iniciando generación de tickets en background para orden {order_id}")
+                                # Responder inmediatamente sin esperar generación de tickets
                                 await db.commit()
-                                print(f"✅ [get_order_status] Tickets generados exitosamente con datos del formulario para orden {order_id}")
+                                await db.refresh(order)
+                                print(f"✅ [get_order_status] Orden actualizada, tickets se generarán en background")
                             else:
                                 # Si no hay attendees, esto es un error crítico - NO crear tickets genéricos
                                 raise ValueError(
@@ -1088,7 +1154,7 @@ class PurchaseService:
                 "payment_reference": None,
                 "created_at": None,
                 "paid_at": None
-            }
+        }
     
     async def _generate_tickets(
         self,
@@ -1310,6 +1376,70 @@ class PurchaseService:
                 db.add(medication)
         
         return child_detail
+    
+    async def _generate_tickets_background(
+        self,
+        order_id: str,
+        attendees_data: List[Dict]
+    ):
+        """
+        Genera tickets de forma asíncrona en background.
+        No bloquea la respuesta del endpoint.
+        
+        Args:
+            order_id: ID de la orden (string)
+            attendees_data: Lista de datos de attendees
+        """
+        from shared.database.connection import async_session_maker
+        from uuid import UUID
+        
+        try:
+            # Crear nueva sesión de BD para background task
+            if async_session_maker is None:
+                print(f"❌ [BACKGROUND] Database no inicializada, no se pueden generar tickets en background")
+                return
+            
+            async with async_session_maker() as db:
+                try:
+                    # Buscar orden
+                    order = await db.get(Order, UUID(order_id))
+                    if not order:
+                        print(f"❌ [BACKGROUND] Orden {order_id} no encontrada para generar tickets")
+                        return
+                    
+                    # Verificar que la orden sigue siendo "completed"
+                    if order.status != "completed":
+                        print(f"⚠️  [BACKGROUND] Orden {order_id} no está completada (status: {order.status}), saltando generación de tickets")
+                        return
+                    
+                    # Verificar que no tenga tickets ya generados
+                    stmt_tickets = select(Ticket).join(OrderItem).where(OrderItem.order_id == order.id)
+                    result_tickets = await db.execute(stmt_tickets)
+                    existing_tickets = result_tickets.scalars().all()
+                    
+                    if existing_tickets:
+                        print(f"⚠️  [BACKGROUND] Orden {order_id} ya tiene {len(existing_tickets)} tickets, saltando generación")
+                        return
+                    
+                    # Generar tickets
+                    await self._generate_tickets(
+                        db,
+                        order,
+                        ticket_status="issued",
+                        attendees_data=attendees_data
+                    )
+                    await db.commit()
+                    print(f"✅ [BACKGROUND] Tickets generados exitosamente para orden {order_id}")
+                    
+                except Exception as e:
+                    await db.rollback()
+                    import traceback
+                    print(f"❌ [BACKGROUND] Error generando tickets para orden {order_id}: {str(e)}")
+                    print(f"❌ [BACKGROUND] Traceback: {traceback.format_exc()}")
+        except Exception as e:
+            import traceback
+            print(f"❌ [BACKGROUND] Error crítico en background task: {str(e)}")
+            print(f"❌ [BACKGROUND] Traceback: {traceback.format_exc()}")
     
     def _generate_idempotency_key(self, request: PurchaseRequest) -> str:
         """Generar clave de idempotencia"""
