@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.sql import func
 from typing import Dict, Optional
 from shared.database.session import get_db
+from shared.database.models import Order
 from shared.auth.dependencies import get_current_user, get_optional_user
 from services.ticket_purchase.models.purchase import (
     PurchaseRequest,
@@ -208,39 +209,72 @@ async def payku_webhook(
         print(f"🔔 [WEBHOOK PAYKU] Estado recibido: {status}")
         
         if status == "approved":
-            order_id_str = str(order.id)  # Guardar ID antes del try para evitar errores de SQLAlchemy async
+            # CRÍTICO: Capturar valores ANTES de cualquier operación que pueda causar rollback
+            order_id_str = str(order.id)
+            idempotency_key_str = str(order.idempotency_key) if order.idempotency_key else None
+            
             print(f"✅ [WEBHOOK PAYKU] Pago aprobado! Actualizando orden {order_id_str} a 'completed'")
             order.status = "completed"
             order.paid_at = datetime.utcnow()
             await db.flush()
             
-            # Intentar recuperar attendees del cache antes de generar tickets
+            # Intentar recuperar attendees - PRIORIDAD 1: desde la base de datos (más confiable)
             attendees_data = None
-            if order.idempotency_key:
+            if order.attendees_data:
+                attendees_data = order.attendees_data
+                print(f"🔍 [WEBHOOK PAYKU] ✅ Attendees recuperados de la base de datos: {len(attendees_data)}")
+            
+            # PRIORIDAD 2: Si no están en BD, intentar desde cache
+            if not attendees_data and idempotency_key_str:
                 from shared.cache.redis_client import cache_get
-                attendees_cache_key = f"purchase:attendees:{order.idempotency_key}"
+                attendees_cache_key = f"purchase:attendees:{idempotency_key_str}"
                 attendees_data = await cache_get(attendees_cache_key)
                 print(f"🔍 [WEBHOOK PAYKU] Buscando attendees en cache: {attendees_cache_key}")
                 print(f"🔍 [WEBHOOK PAYKU] Attendees encontrados: {attendees_data is not None}")
                 if attendees_data:
-                    print(f"🔍 [WEBHOOK PAYKU] Attendees count: {len(attendees_data)}")
+                    print(f"🔍 [WEBHOOK PAYKU] ✅ Attendees recuperados del cache: {len(attendees_data)}")
+                    # Guardar en BD para futuras referencias
+                    order.attendees_data = attendees_data
+                    await db.flush()
             
             # Generar tickets después de pago exitoso
+            # CRÍTICO: Los tickets SIEMPRE deben crearse con los datos del formulario
             try:
-                await service._generate_tickets(db, order, ticket_status="issued", attendees_data=attendees_data)
-                await db.commit()
-                print(f"✅ [WEBHOOK PAYKU] Tickets generados exitosamente para orden {order_id_str}")
+                if attendees_data:
+                    await service._generate_tickets(db, order, ticket_status="issued", attendees_data=attendees_data)
+                    await db.commit()
+                    print(f"✅ [WEBHOOK PAYKU] Tickets generados exitosamente con datos del formulario para orden {order_id_str}")
+                else:
+                    # Si no hay attendees, esto es un error crítico - NO crear tickets genéricos
+                    raise ValueError(
+                        f"❌ ERROR CRÍTICO: No se encontraron datos de attendees para orden {order_id_str}. "
+                        f"Los tickets NO pueden crearse sin los datos del formulario. "
+                        f"Idempotency key: {idempotency_key_str}. "
+                        f"La orden quedará marcada como 'completed' pero SIN TICKETS. "
+                        f"Se requiere intervención manual para generar los tickets con los datos correctos."
+                    )
             except ValueError as e:
                 # Si falla por falta de attendees, esto es un error crítico
                 await db.rollback()
                 import traceback
                 print(f"❌ [WEBHOOK PAYKU] ERROR CRÍTICO: No se encontraron datos de attendees para orden {order_id_str}")
                 print(f"❌ [WEBHOOK PAYKU] Error: {str(e)}")
-                print(f"❌ [WEBHOOK PAYKU] Idempotency key: {order.idempotency_key}")
+                print(f"❌ [WEBHOOK PAYKU] Idempotency key: {idempotency_key_str}")
                 print(f"❌ [WEBHOOK PAYKU] Traceback: {traceback.format_exc()}")
                 # Marcar orden como paid pero sin tickets - requiere intervención manual
-                order.status = "completed"
-                await db.commit()
+                # Usar order_id_str en lugar de order.id para evitar MissingGreenlet
+                try:
+                    # select ya está importado al inicio del archivo, no importar nuevamente
+                    from shared.database.models import Order
+                    stmt = select(Order).where(Order.id == order_id_str)
+                    result = await db.execute(stmt)
+                    order_for_update = result.scalar_one_or_none()
+                    if order_for_update:
+                        order_for_update.status = "completed"
+                        await db.commit()
+                except Exception as commit_error:
+                    print(f"❌ [WEBHOOK PAYKU] Error crítico al hacer commit: {str(commit_error)}")
+                    await db.rollback()
                 print(f"⚠️  [WEBHOOK PAYKU] Orden {order_id_str} marcada como completed SIN TICKETS.")
                 print(f"⚠️  [WEBHOOK PAYKU] REQUIERE GENERACIÓN MANUAL DE TICKETS.")
             except Exception as e:
@@ -250,8 +284,18 @@ async def payku_webhook(
                 print(f"❌ [WEBHOOK PAYKU] Error generando tickets para orden {order_id_str}: {str(e)}")
                 print(f"❌ [WEBHOOK PAYKU] Traceback: {traceback.format_exc()}")
                 # Marcar orden como paid aunque falle la generación de tickets
-                order.status = "completed"
-                await db.commit()
+                try:
+                    # select ya está importado al inicio del archivo, no importar nuevamente
+                    from shared.database.models import Order
+                    stmt = select(Order).where(Order.id == order_id_str)
+                    result = await db.execute(stmt)
+                    order_for_update = result.scalar_one_or_none()
+                    if order_for_update:
+                        order_for_update.status = "completed"
+                        await db.commit()
+                except Exception as commit_error:
+                    print(f"❌ [WEBHOOK PAYKU] Error crítico al hacer commit: {str(commit_error)}")
+                    await db.rollback()
                 print(f"⚠️  [WEBHOOK PAYKU] Orden {order_id_str} marcada como completed sin tickets. Se pueden generar manualmente.")
             
             return {"status": "ok", "message": "Payment approved and tickets generated"}
@@ -446,8 +490,7 @@ async def get_order_status(
         )
     
     # Obtener orden completa para verificar user_id
-    from sqlalchemy import select
-    from shared.database.models import Order
+    # select y Order ya están importados al inicio del archivo
     stmt = select(Order).where(Order.id == order_id)
     result = await db.execute(stmt)
     order = result.scalar_one_or_none()

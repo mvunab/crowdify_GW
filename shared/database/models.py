@@ -1,6 +1,6 @@
 """Modelos SQLAlchemy compatibles con Supabase"""
 from sqlalchemy import Column, String, Integer, Boolean, DateTime, Date, ForeignKey, Numeric, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import uuid
@@ -122,6 +122,7 @@ class Order(Base):
     payment_reference = Column(String, nullable=True)
     receipt_url = Column(String, nullable=True)  # URL del comprobante de transferencia bancaria
     idempotency_key = Column(String, unique=True, nullable=True)
+    attendees_data = Column(JSONB, nullable=True)  # Datos de attendees del formulario (respaldo del cache)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     paid_at = Column(DateTime(timezone=True), nullable=True)

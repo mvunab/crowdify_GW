@@ -50,4 +50,5 @@ class OrderStatusResponse(BaseModel):
     payment_reference: Optional[str] = None
     created_at: datetime
     paid_at: Optional[datetime] = None
+    attendees_data: Optional[List[Dict]] = None  # Datos de attendees para obtener tickets
 

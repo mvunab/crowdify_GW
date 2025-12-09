@@ -424,7 +424,29 @@ class PurchaseService:
         
         # El método de pago ya se determinó arriba
         
+        # Preparar datos de attendees ANTES de crear la orden
+        # IMPORTANTE: Esto debe hacerse antes de crear el Order para poder guardarlo en attendees_data
+        attendees_data = []
+        for att in request.attendees:
+            child_details_dict = None
+            if att.child_details:
+                # Si child_details es un objeto Pydantic, usar .dict(), si es dict, usar directamente
+                if hasattr(att.child_details, 'dict'):
+                    child_details_dict = att.child_details.dict()
+                else:
+                    child_details_dict = att.child_details
+            
+            attendees_data.append({
+                "name": att.name,
+                "email": att.email,
+                "document_type": att.document_type,
+                "document_number": att.document_number,
+                "is_child": att.is_child,
+                "child_details": child_details_dict
+            })
+        
         # Crear orden - user_id es opcional ahora
+        # IMPORTANTE: Guardar datos de attendees en la orden para recuperarlos después del pago
         order = Order(
             id=uuid.uuid4(),
             user_id=uuid.UUID(request.user_id) if request.user_id else None,
@@ -436,6 +458,7 @@ class PurchaseService:
             payment_provider=payment_method,
             receipt_url=request.receipt_url if is_bank_transfer else None,
             idempotency_key=idempotency_key,
+            attendees_data=attendees_data,  # Guardar datos de attendees en la base de datos
             created_at=datetime.utcnow()
         )
         db.add(order)
@@ -488,35 +511,18 @@ class PurchaseService:
         
         await db.flush()
         
-        # Preparar datos de attendees
-        attendees_data = []
-        for att in request.attendees:
-            child_details_dict = None
-            if att.child_details:
-                # Si child_details es un objeto Pydantic, usar .dict(), si es dict, usar directamente
-                if hasattr(att.child_details, 'dict'):
-                    child_details_dict = att.child_details.dict()
-                else:
-                    child_details_dict = att.child_details
-            
-            attendees_data.append({
-                "name": att.name,
-                "email": att.email,
-                "document_type": att.document_type,
-                "document_number": att.document_number,
-                "is_child": att.is_child,
-                "child_details": child_details_dict
-            })
-        
         # Guardar attendees en cache para recuperarlos después del pago
         # Necesario para pagos asíncronos (Mercado Pago y Payku) donde el webhook llega después
         # Para transferencias bancarias, creamos tickets inmediatamente, no necesitamos cache
-        if not is_bank_transfer and request.idempotency_key:
-            attendees_cache_key = f"purchase:attendees:{request.idempotency_key}"
+        # IMPORTANTE: Usar order.idempotency_key (hash final) en lugar de request.idempotency_key
+        # para que coincida con la búsqueda en get_order_status
+        if not is_bank_transfer and order.idempotency_key:
+            attendees_cache_key = f"purchase:attendees:{order.idempotency_key}"
             await cache_set(attendees_cache_key, attendees_data, expire=86400)  # 24 horas
             print(f"[DEBUG SERVICE] ✅ Datos de attendees guardados en cache: {attendees_cache_key}")
             print(f"[DEBUG SERVICE]   - Attendees count: {len(attendees_data)}")
             print(f"[DEBUG SERVICE]   - Payment method: {payment_method}")
+            print(f"[DEBUG SERVICE]   - Order idempotency_key: {order.idempotency_key}")
         
         # Reservar capacidad
         reserved = await self.inventory_service.reserve_capacity(
@@ -905,7 +911,13 @@ class PurchaseService:
         db: AsyncSession,
         order_id: str
     ) -> Optional[Dict]:
-        """Obtener estado de una orden"""
+        """
+        Obtener estado de una orden
+        
+        Si el estado es "pending" y el payment_provider es "payku",
+        consulta activamente a Payku para verificar el estado real
+        y actualiza la base de datos si es necesario.
+        """
         stmt = select(Order).where(Order.id == order_id)
         result = await db.execute(stmt)
         order = result.scalar_one_or_none()
@@ -913,16 +925,170 @@ class PurchaseService:
         if not order:
             return None
         
-        return {
-            "order_id": str(order.id),
-            "status": order.status,
-            "total": float(order.total),
-            "currency": order.currency,
-            "payment_provider": order.payment_provider,
-            "payment_reference": order.payment_reference,
-            "created_at": order.created_at,
-            "paid_at": order.paid_at
-        }
+        # Si el estado es "pending" y es una orden de Payku, verificar activamente con Payku
+        if order.status == "pending" and order.payment_provider == "payku" and order.payment_reference:
+            try:
+                print(f"🔍 [get_order_status] Verificando estado en Payku para orden {order_id}")
+                print(f"🔍 [get_order_status] Transaction ID: {order.payment_reference}")
+                
+                # Consultar estado en Payku
+                transaction_data = self.payku_service.verify_transaction(order.payment_reference)
+                
+                print(f"🔍 [get_order_status] Respuesta de Payku: {transaction_data}")
+                
+                # Extraer estado de la transacción
+                # Payku puede devolver el estado en diferentes formatos
+                status = transaction_data.get("status", "").lower()
+                
+                # También verificar en payment.status si existe
+                payment_data = transaction_data.get("payment", {})
+                if payment_data and payment_data.get("status"):
+                    status = payment_data.get("status", "").lower()
+                
+                print(f"🔍 [get_order_status] Estado procesado de Payku: {status}")
+                
+                # Mapear estados de Payku a estados internos
+                status_mapping = {
+                    'success': 'completed',
+                    'approved': 'completed',
+                    'completado': 'completed',
+                    'completed': 'completed',
+                    'failed': 'cancelled',
+                    'rejected': 'cancelled',
+                    'cancelled': 'cancelled',
+                    'cancelado': 'cancelled',
+                    'pending': 'pending',
+                    'pendiente': 'pending'
+                }
+                
+                mapped_status = status_mapping.get(status, order.status)
+                
+                print(f"🔍 [get_order_status] Estado mapeado: {mapped_status} (original: {status})")
+                
+                # Si el estado cambió, actualizar la orden
+                if mapped_status != order.status:
+                    print(f"✅ [get_order_status] Estado cambió de '{order.status}' a '{mapped_status}'. Actualizando orden...")
+                    
+                    # Guardar idempotency_key ANTES de cualquier operación que pueda fallar
+                    idempotency_key_str = str(order.idempotency_key) if order.idempotency_key else None
+                    
+                    order.status = mapped_status
+                    
+                    if mapped_status == "completed":
+                        order.paid_at = datetime.utcnow()
+                        await db.flush()
+                        
+                        # Intentar recuperar attendees - PRIORIDAD 1: desde la base de datos (más confiable)
+                        attendees_data = None
+                        if order.attendees_data:
+                            attendees_data = order.attendees_data
+                            print(f"🔍 [get_order_status] ✅ Attendees recuperados de la base de datos: {len(attendees_data)}")
+                        
+                        # PRIORIDAD 2: Si no están en BD, intentar desde cache
+                        if not attendees_data and idempotency_key_str:
+                            attendees_cache_key = f"purchase:attendees:{idempotency_key_str}"
+                            attendees_data = await cache_get(attendees_cache_key)
+                            print(f"🔍 [get_order_status] Attendees del cache: {attendees_data is not None}")
+                            if attendees_data:
+                                print(f"🔍 [get_order_status] ✅ Attendees recuperados del cache: {len(attendees_data)}")
+                                # Guardar en BD para futuras referencias
+                                order.attendees_data = attendees_data
+                                await db.flush()
+                        
+                        # Generar tickets después de pago exitoso
+                        # CRÍTICO: Los tickets SIEMPRE deben crearse con los datos del formulario
+                        try:
+                            if attendees_data:
+                                await self._generate_tickets(db, order, ticket_status="issued", attendees_data=attendees_data)
+                                await db.commit()
+                                print(f"✅ [get_order_status] Tickets generados exitosamente con datos del formulario para orden {order_id}")
+                            else:
+                                # Si no hay attendees, esto es un error crítico - NO crear tickets genéricos
+                                raise ValueError(
+                                    f"❌ ERROR CRÍTICO: No se encontraron datos de attendees para orden {order_id}. "
+                                    f"Los tickets NO pueden crearse sin los datos del formulario. "
+                                    f"Idempotency key: {idempotency_key_str}. "
+                                    f"La orden quedará marcada como 'completed' pero SIN TICKETS. "
+                                    f"Se requiere intervención manual para generar los tickets con los datos correctos."
+                                )
+                        except Exception as e:
+                            await db.rollback()
+                            # Log error pero no fallar la verificación
+                            import traceback
+                            print(f"❌ [get_order_status] Error generando tickets para orden {order_id}: {str(e)}")
+                            print(f"❌ [get_order_status] Idempotency key: {idempotency_key_str}")
+                            print(f"❌ [get_order_status] Traceback: {traceback.format_exc()}")
+                            # Marcar orden como completed aunque falle la generación de tickets
+                            # Usar order_id en lugar de order para evitar MissingGreenlet después del rollback
+                            # Order ya está importado al inicio del archivo, no importar nuevamente
+                            try:
+                                stmt = select(Order).where(Order.id == order_id)
+                                result = await db.execute(stmt)
+                                order_for_update = result.scalar_one_or_none()
+                                if order_for_update:
+                                    order_for_update.status = "completed"
+                                    await db.commit()
+                                    print(f"⚠️  [get_order_status] Orden {order_id} marcada como completed sin tickets. Se pueden generar manualmente.")
+                            except Exception as commit_error:
+                                # Si incluso el commit falla, al menos loguear
+                                print(f"❌ [get_order_status] Error crítico al hacer commit: {str(commit_error)}")
+                                await db.rollback()
+                    elif mapped_status == "cancelled":
+                        await db.commit()
+                        
+                        # Liberar capacidad
+                        for order_item in order.order_items:
+                            await self.inventory_service.release_capacity(
+                                db, str(order_item.event_id), order_item.quantity, "payment_failed"
+                            )
+                    else:
+                        await db.commit()
+                    
+                    # Refrescar la orden para obtener los valores actualizados
+                    await db.refresh(order)
+                    print(f"✅ [get_order_status] Orden actualizada exitosamente")
+                else:
+                    print(f"⏳ [get_order_status] Estado sigue siendo '{order.status}'. No se requiere actualización.")
+                    
+            except Exception as e:
+                # Si falla la verificación con Payku, log el error pero retornar el estado local
+                import traceback
+                # Guardar el estado antes de intentar acceder a order (puede estar en estado inválido)
+                current_status = order.status if hasattr(order, 'status') else "pending"
+                print(f"⚠️  [get_order_status] Error verificando estado en Payku: {str(e)}")
+                print(f"⚠️  [get_order_status] Traceback: {traceback.format_exc()}")
+                print(f"⚠️  [get_order_status] Retornando estado local: {current_status}")
+                # Continuar con el estado local si falla la verificación
+        
+        # Construir respuesta de forma segura
+        try:
+            return {
+                "order_id": str(order.id),
+                "status": order.status,
+                "total": float(order.total),
+                "currency": order.currency,
+                "payment_provider": order.payment_provider,
+                "payment_reference": order.payment_reference,
+                "created_at": order.created_at,
+                "paid_at": order.paid_at,
+                "attendees_data": order.attendees_data  # Incluir datos de attendees para obtener tickets
+            }
+        except Exception as e:
+            # Si hay error accediendo a order, intentar obtener datos básicos
+            import traceback
+            print(f"⚠️  [get_order_status] Error construyendo respuesta: {str(e)}")
+            print(f"⚠️  [get_order_status] Traceback: {traceback.format_exc()}")
+            # Retornar datos mínimos
+            return {
+                "order_id": order_id,
+                "status": "pending",  # Estado por defecto si no se puede obtener
+                "total": 0.0,
+                "currency": "CLP",
+                "payment_provider": "payku",
+                "payment_reference": None,
+                "created_at": None,
+                "paid_at": None
+            }
     
     async def _generate_tickets(
         self,
@@ -937,17 +1103,29 @@ class PurchaseService:
         Args:
             db: Sesión de base de datos
             order: Orden
-            attendees_data: Datos de attendees (opcional, si no se proporciona se busca en cache)
+            attendees_data: Datos de attendees (opcional, si no se proporciona se busca en BD o cache)
             ticket_status: Estado inicial de los tickets ("issued" para Mercado Pago, "pending" para transferencias)
         
         Returns:
             Lista de tickets generados
         """
-        # Si no se proporcionan attendees_data, recuperarlos del cache usando idempotency_key
+        # PRIORIDAD 1: Si no se proporcionan attendees_data, intentar recuperarlos de la base de datos
+        if not attendees_data:
+            if order.attendees_data:
+                attendees_data = order.attendees_data
+                print(f"🔍 [_generate_tickets] ✅ Attendees recuperados de la base de datos: {len(attendees_data)}")
+        
+        # PRIORIDAD 2: Si no están en BD, intentar desde cache usando idempotency_key
         if not attendees_data:
             if order.idempotency_key:
-                attendees_cache_key = f"purchase:attendees:{order.idempotency_key}"
+                idempotency_key_str = str(order.idempotency_key)
+                attendees_cache_key = f"purchase:attendees:{idempotency_key_str}"
                 attendees_data = await cache_get(attendees_cache_key)
+                if attendees_data:
+                    print(f"🔍 [_generate_tickets] ✅ Attendees recuperados del cache: {len(attendees_data)}")
+                    # Guardar en BD para futuras referencias
+                    order.attendees_data = attendees_data
+                    await db.flush()
             
             if not attendees_data:
                 raise ValueError(f"No se encontraron datos de attendees para orden {order.id}")
@@ -956,14 +1134,11 @@ class PurchaseService:
         commission_total = 0.0
         attendee_index = 0  # Índice global para rastrear qué attendee corresponde a cada ticket
         
-        # Obtener order items - si order.order_items está vacío, cargarlos explícitamente
-        if not order.order_items:
-            # Cargar order_items explícitamente desde la base de datos
-            stmt_order_items = select(OrderItem).where(OrderItem.order_id == order.id)
-            result_order_items = await db.execute(stmt_order_items)
-            order_items_list = result_order_items.scalars().all()
-        else:
-            order_items_list = list(order.order_items)
+        # CRÍTICO: Cargar order_items explícitamente desde la base de datos
+        # NO usar order.order_items directamente para evitar lazy loading y MissingGreenlet
+        stmt_order_items = select(OrderItem).where(OrderItem.order_id == order.id)
+        result_order_items = await db.execute(stmt_order_items)
+        order_items_list = result_order_items.scalars().all()
         
         if not order_items_list:
             raise ValueError(f"No se encontraron order_items para la orden {order.id}")

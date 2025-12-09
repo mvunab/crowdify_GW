@@ -1,107 +1,144 @@
-# Crowdify GW - Copilot Instructions
+# Copilot Instructions for Crowdify GW
 
-## Architecture Overview
+## Project Overview
+FastAPI-based ticket sales and validation platform for events. Uses Supabase (production) or local PostgreSQL (development) with Redis caching, Celery workers, and MercadoPago/Payku payment integrations.
 
-FastAPI-based ticket sales platform using **service-oriented architecture**. Core services under `services/`:
-- `ticket_purchase/` - Order creation, MercadoPago integration, webhook handling
-- `ticket_validation/` - QR-based ticket scanning/validation
-- `event_management/` - Event CRUD, ticket types, capacity management
-- `admin/` - Admin dashboard, user management, stats
-- `notifications/` - Email via SendGrid + Celery async tasks
+## Architecture
 
-Shared modules under `shared/`:
-- `auth/` - JWT + Supabase Auth dual validation (`jwt_handler.py`)
-- `database/` - SQLAlchemy async models (`models.py`), connection pooling
-- `cache/` - Redis client + Celery workers
-
-## Critical Patterns
-
-### Database Models
-All SQLAlchemy models live in `shared/database/models.py` (single source of truth). Pydantic schemas are per-service in `services/{service}/models/`. Example pattern:
-```python
-# SQLAlchemy model (shared/database/models.py)
-class Event(Base):
-    __tablename__ = "events"
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-
-# Pydantic schema (services/event_management/models/event.py)
-class EventResponse(BaseModel):
-    id: str  # UUIDs serialize to strings
-    class Config:
-        from_attributes = True
+### Service Boundaries
+```
+main.py                    # FastAPI entrypoint, routes all /api/v1/* endpoints
+├── services/              # Domain modules with their own models/routes/services
+│   ├── ticket_purchase/   # Purchase flow, payment providers (MercadoPago, Payku)
+│   ├── ticket_validation/ # QR validation for scanners at events
+│   ├── event_management/  # CRUD for events, ticket types, prices
+│   ├── notifications/     # Email notifications via SMTP/SendGrid
+│   └── admin/             # Admin-only operations
+├── shared/                # Cross-cutting concerns
+│   ├── database/          # SQLAlchemy models, connection, session
+│   ├── auth/              # JWT/Supabase token validation, role-based deps
+│   ├── cache/             # Redis client, distributed locks, Celery app
+│   └── utils/             # QR generation, rate limiting
+└── pdfsvc/                # Separate microservice for PDF generation + MinIO storage
 ```
 
-### Authentication Flow
-Dual-mode JWT verification in `shared/auth/jwt_handler.py`:
-1. Supabase Auth tokens (check `iss` claim for `supabase.co/auth`)
-2. Backend-generated tokens (local validation)
+### Data Flow Pattern
+1. Routes use `Depends(get_db)` for async SQLAlchemy sessions
+2. Services are instantiated per-request (lazy-loaded payment providers)
+3. Redis caching with `cache_get`/`cache_set` for expensive queries (events list)
+4. Celery tasks for async work (PDF generation, email sending)
 
-Role-based dependencies in `shared/auth/dependencies.py`:
-- `get_current_user` - Any authenticated user
-- `get_current_admin` - Admin only
-- `get_current_admin_or_coordinator` - Admin or coordinator
-- `get_current_scanner` - Scanner/admin/coordinator
-- `get_optional_user` - Optional auth (public endpoints)
+## Key Conventions
 
-### API Route Structure
-All routes prefixed with `/api/v1/` (see `main.py`). Pattern:
+### Authentication Dependencies (`shared/auth/dependencies.py`)
 ```python
-# services/{service}/routes/{resource}.py
-router = APIRouter()
-
-@router.post("", response_model=ResponseModel)
-async def create_resource(
-    request: RequestModel,
-    db: AsyncSession = Depends(get_db),
-    current_user: Dict = Depends(get_current_user)
-):
+# Use appropriate dependency based on endpoint requirements:
+get_current_user       # Requires valid JWT
+get_optional_user      # Returns None if no auth (anonymous purchases)
+get_current_admin      # Requires role='admin'
+get_current_scanner    # Requires role in ['scanner', 'admin', 'coordinator']
 ```
 
-### Async Database Sessions
-Always use dependency injection:
-```python
-from shared.database.session import get_db
-async def endpoint(db: AsyncSession = Depends(get_db)):
+### Database Models (`shared/database/models.py`)
+- All models use UUID primary keys with `uuid.uuid4` default
+- Timestamps: `created_at`, `updated_at` with `server_default=func.now()`
+- Main entities: `User`, `Event`, `TicketType`, `Order`, `OrderItem`, `Ticket`
+- Orders can be anonymous (`user_id` is nullable)
+
+### Service Module Structure
+Each service follows this pattern:
+```
+services/<domain>/
+├── models/      # Pydantic schemas for request/response
+├── routes/      # FastAPI router with endpoints
+├── services/    # Business logic classes
+└── tasks/       # Celery tasks (optional)
 ```
 
-### Redis/Caching
-Use `cache_get`/`cache_set` from `shared/cache/redis_client.py` for idempotency and caching.
+### Configuration (`app/core/config.py`)
+Settings loaded via `pydantic-settings` from `.env`. Key settings:
+- `DATABASE_URL`: PostgreSQL connection (auto-converted to asyncpg)
+- `MERCADOPAGO_ACCESS_TOKEN`: Payment provider (prefix `TEST-` for sandbox)
+- `NGROK_URL`: Required for payment webhooks in development
 
-## Development Commands
+## Development Workflow
 
-```powershell
-# Start development stack
+### Quick Start
+```pwsh
 docker compose up -d --build
-
-# Run database migrations
 docker compose exec backend bash -lc "alembic -c app/alembic/alembic.ini upgrade head"
-
-# Add new dependency
-docker compose exec backend poetry add <package-name>
-
-# Run Celery worker (handled by docker compose, but manual)
-poetry run celery -A shared.cache.celery_app:celery_app worker -l INFO
+curl http://localhost:8000/health
 ```
 
-## Key Integrations
-
-- **MercadoPago**: Payment processing (`services/ticket_purchase/services/mercado_pago_service.py`)
-- **Supabase**: Database (Postgres) + Auth - connection configured in `shared/database/connection.py`
-- **Redis**: Cache + Celery broker
-- **MinIO**: PDF storage for tickets (S3-compatible)
-
-## Environment Variables
-
-Critical variables (see `env.template`):
-- `DATABASE_URL` - Postgres/Supabase connection
-- `SUPABASE_URL`, `SUPABASE_ANON_KEY` - Supabase Auth
-- `MERCADOPAGO_ACCESS_TOKEN` - Payment processing
-- `REDIS_URL` - Cache/task queue
-- `JWT_SECRET`, `QR_SECRET` - Security tokens
-
-## Testing
-```powershell
-poetry run pytest
-# Specific test file
-poetry run pytest test_mercadopago.py
+### Useful Commands
+```pwsh
+make logs-backend          # Tail backend logs
+make shell                 # Bash into backend container
+make test                  # Run pytest
+make poetry-add PKG=name   # Add dependency via Poetry
+make health                # Check all services health
 ```
+
+### Services & Ports
+| Service | Port | Credentials |
+|---------|------|-------------|
+| API | 8000 | - |
+| PostgreSQL | 5432 | tickets/tickets |
+| Redis | 6379 | - |
+| MinIO | 9000 (API), 9003 (console) | minio/minio12345 |
+| Mailhog | 8025 | - |
+| PDF Service | 9002 | - |
+
+### Testing Payment Webhooks
+MercadoPago/Payku webhooks require public URLs. Use ngrok:
+```pwsh
+ngrok http 8000
+# Set NGROK_URL in .env, restart backend
+```
+
+## Code Patterns
+
+### Adding New Endpoints
+1. Create Pydantic models in `services/<domain>/models/`
+2. Add route in `services/<domain>/routes/` with appropriate auth dependency
+3. Implement business logic in `services/<domain>/services/`
+4. Register router in `main.py` with prefix and tags
+
+### Database Queries
+```python
+# Always use async SQLAlchemy patterns:
+async with db.begin():
+    result = await db.execute(select(Model).where(...))
+    item = result.scalar_one_or_none()
+```
+
+### Caching Pattern
+```python
+cache_key = f"entity:{id}"
+cached = await cache_get(cache_key)
+if cached:
+    return cached
+# ... compute result
+await cache_set(cache_key, result, ttl=300)
+```
+
+### Idempotency (Purchases)
+Purchase requests use `idempotency_key` combining user/items/payment_method to prevent duplicates. Check Redis cache before processing.
+
+## External Integrations
+
+### Supabase
+- Auth tokens validated via `shared/auth/supabase_validator.py`
+- User roles stored in `app_metadata.role`
+- Database can use Supabase PostgreSQL (set `DATABASE_URL` in `.env`)
+
+### MercadoPago
+- Sandbox requires `TEST-` prefixed tokens
+- Webhook URL must be publicly accessible (ngrok for dev)
+- See `docs/MERCADOPAGO_SETUP.md` for credential setup
+
+## Important Files
+- `env.template`: All environment variables with descriptions
+- `Makefile`: All development commands
+- `docker-compose.yml`: Local development stack
+- `docs/`: Detailed documentation for specific features
