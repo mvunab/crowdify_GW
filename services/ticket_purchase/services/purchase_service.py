@@ -14,7 +14,11 @@ from services.ticket_purchase.models.purchase import PurchaseRequest, AttendeeDa
 from services.ticket_purchase.services.inventory_service import InventoryService
 from services.ticket_purchase.services.mercado_pago_service import MercadoPagoService
 from services.ticket_purchase.services.payku_service import PaykuService
+from services.notifications.services.email_service import EmailService
 from shared.cache.redis_client import cache_get, cache_set
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class PurchaseService:
@@ -1331,7 +1335,111 @@ class PurchaseService:
             else:
                 print(f"⚠️  [_generate_tickets] No se encontró el evento {event_id} para actualizar capacity_available")
         
+        # Enviar emails con tickets (solo si el status es "issued", no para "pending")
+        if ticket_status == "issued" and tickets:
+            try:
+                await self._send_ticket_emails(db, order, tickets)
+            except Exception as e:
+                # No fallar la generación de tickets si el email falla
+                logger.error(f"Error enviando emails de tickets para orden {order.id}: {e}", exc_info=True)
+                print(f"⚠️  [_generate_tickets] Error enviando emails: {e}")
+        
         return tickets
+    
+    async def _send_ticket_emails(
+        self,
+        db: AsyncSession,
+        order: Order,
+        tickets: List[Ticket]
+    ):
+        """
+        Enviar emails con tickets a los asistentes
+        
+        Agrupa tickets por email y envía un email por cada destinatario
+        """
+        from collections import defaultdict
+        from datetime import datetime
+        
+        # Agrupar tickets por email
+        tickets_by_email = defaultdict(list)
+        for ticket in tickets:
+            if ticket.holder_email:
+                tickets_by_email[ticket.holder_email.lower().strip()].append(ticket)
+        
+        if not tickets_by_email:
+            logger.warning(f"No hay emails para enviar tickets de orden {order.id}")
+            return
+        
+        # Obtener información del evento (asumimos que todos los tickets son del mismo evento)
+        if not tickets:
+            return
+        
+        first_ticket = tickets[0]
+        stmt_event = select(Event).where(Event.id == first_ticket.event_id)
+        result_event = await db.execute(stmt_event)
+        event = result_event.scalar_one_or_none()
+        
+        if not event:
+            logger.warning(f"No se encontró el evento {first_ticket.event_id} para enviar emails")
+            return
+        
+        # Formatear fecha del evento
+        event_date_str = "Fecha no especificada"
+        event_location_str = event.location_text or "Ubicación no especificada"
+        
+        if event.starts_at:
+            try:
+                if isinstance(event.starts_at, str):
+                    event_datetime = datetime.fromisoformat(event.starts_at.replace("Z", "+00:00"))
+                else:
+                    event_datetime = event.starts_at
+                
+                # Formatear fecha en español
+                event_date_str = event_datetime.strftime("%d de %B, %Y")
+                # Reemplazar nombres de meses en inglés por español
+                months_es = {
+                    "January": "Enero", "February": "Febrero", "March": "Marzo",
+                    "April": "Abril", "May": "Mayo", "June": "Junio",
+                    "July": "Julio", "August": "Agosto", "September": "Septiembre",
+                    "October": "Octubre", "November": "Noviembre", "December": "Diciembre"
+                }
+                for en, es in months_es.items():
+                    event_date_str = event_date_str.replace(en, es)
+            except Exception as e:
+                logger.warning(f"Error formateando fecha del evento: {e}")
+        
+        # Inicializar servicio de email
+        email_service = EmailService()
+        
+        # Enviar un email por cada destinatario
+        for email, user_tickets in tickets_by_email.items():
+            try:
+                # Obtener nombre del primer ticket (o usar un nombre genérico)
+                first_ticket = user_tickets[0]
+                attendee_name = f"{first_ticket.holder_first_name} {first_ticket.holder_last_name}".strip()
+                if not attendee_name:
+                    attendee_name = "Estimado/a"
+                
+                # Enviar email con todos los tickets de este usuario
+                # Por ahora enviamos un email por ticket, pero podríamos agruparlos
+                for ticket in user_tickets:
+                    success = await email_service.send_ticket_email(
+                        to_email=email,
+                        attendee_name=attendee_name,
+                        event_name=event.name,
+                        event_date=event_date_str,
+                        event_location=event_location_str,
+                        ticket_id=str(ticket.id)[:8].upper(),  # Mostrar solo primeros 8 caracteres
+                        qr_signature=ticket.qr_signature  # Pasar QR signature para generar imagen
+                    )
+                    
+                    if success:
+                        logger.info(f"Email enviado exitosamente a {email} para ticket {ticket.id}")
+                    else:
+                        logger.error(f"Error enviando email a {email} para ticket {ticket.id}")
+                
+            except Exception as e:
+                logger.error(f"Error enviando email a {email}: {e}", exc_info=True)
     
     async def _create_child_details(
         self,

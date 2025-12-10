@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
     MINIO_BUCKET_TICKETS: str = "tickets-pdf"
 
+    # Resend Configuration (reemplaza MailHog)
+    RESEND_API_KEY: str = ""
+    RESEND_FROM_EMAIL: str = "tickets@example.local"
+    
+    # SMTP Configuration (legacy, mantenido para compatibilidad)
     SMTP_HOST: str = "mailhog"
     SMTP_PORT: int = 1025
     SMTP_FROM: str = "tickets@example.local"

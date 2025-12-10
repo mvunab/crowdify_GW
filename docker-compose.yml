@@ -32,10 +32,12 @@ services:
     volumes:
       - miniodata:/data
 
-  mailhog:
-    image: mailhog/mailhog
-    ports:
-      - "8025:8025"
+  # MailHog comentado - ahora usamos Resend
+  # mailhog:
+  #   image: mailhog/mailhog
+  #   ports:
+  #     - "1025:1025"  # SMTP port
+  #     - "8025:8025"  # Web UI port
 
   backend:
     build: .
@@ -49,6 +51,10 @@ services:
       MINIO_BUCKET_TICKETS: tickets-pdf
       JWT_SECRET: ${JWT_SECRET:-dev-secret}
       QR_SECRET: ${QR_SECRET:-dev-qr}
+      # Resend Configuration
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-onboarding@resend.dev}
+      # SMTP Legacy (mantenido para compatibilidad)
       SMTP_HOST: mailhog
       SMTP_PORT: "1025"
       SMTP_FROM: tickets@example.local
@@ -89,6 +95,10 @@ services:
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio12345}
       MINIO_SECURE: "false"
       MINIO_BUCKET_TICKETS: tickets-pdf
+      # Resend Configuration
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-onboarding@resend.dev}
+      # SMTP Legacy (mantenido para compatibilidad)
       SMTP_HOST: mailhog
       SMTP_PORT: "1025"
       SMTP_FROM: tickets@example.local

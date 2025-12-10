@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.sql import func
 from typing import Dict, Optional
 from shared.database.session import get_db
-from shared.database.models import Order
+from shared.database.models import Order, Event
 from shared.auth.dependencies import get_current_user, get_optional_user
 from services.ticket_purchase.models.purchase import (
     PurchaseRequest,
@@ -1008,17 +1008,93 @@ async def admin_resend_tickets(
         
         print(f"[RESEND] Reenviando {len(tickets)} tickets de orden {order_id} a {target_email}")
         
-        # TODO: Implementar envío de email cuando esté configurado
-        # Por ahora solo retornamos la información
+        # Obtener información del evento
+        first_ticket = tickets[0]
+        result_event = await db.execute(
+            select(Event).where(Event.id == first_ticket.event_id)
+        )
+        event = result_event.scalar_one_or_none()
+        
+        if not event:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No se encontró el evento asociado a los tickets"
+            )
+        
+        # Formatear fecha del evento
+        from datetime import datetime
+        event_date_str = "Fecha no especificada"
+        event_location_str = event.location_text or "Ubicación no especificada"
+        
+        if event.starts_at:
+            try:
+                if isinstance(event.starts_at, str):
+                    event_datetime = datetime.fromisoformat(event.starts_at.replace("Z", "+00:00"))
+                else:
+                    event_datetime = event.starts_at
+                
+                # Formatear fecha en español
+                event_date_str = event_datetime.strftime("%d de %B, %Y")
+                # Reemplazar nombres de meses en inglés por español
+                months_es = {
+                    "January": "Enero", "February": "Febrero", "March": "Marzo",
+                    "April": "Abril", "May": "Mayo", "June": "Junio",
+                    "July": "Julio", "August": "Agosto", "September": "Septiembre",
+                    "October": "Octubre", "November": "Noviembre", "December": "Diciembre"
+                }
+                for en, es in months_es.items():
+                    event_date_str = event_date_str.replace(en, es)
+            except Exception as e:
+                print(f"Error formateando fecha del evento: {e}")
+        
+        # Enviar emails con tickets
+        from services.notifications.services.email_service import EmailService
+        email_service = EmailService()
+        
+        emails_sent = 0
+        emails_failed = 0
+        
+        # Agrupar tickets por email (por si hay múltiples destinatarios)
+        from collections import defaultdict
+        tickets_by_email = defaultdict(list)
+        for ticket in tickets:
+            email_key = target_email.lower().strip()
+            tickets_by_email[email_key].append(ticket)
+        
+        # Enviar un email por cada ticket (o agrupar si es el mismo email)
+        for email, user_tickets in tickets_by_email.items():
+            for ticket in user_tickets:
+                try:
+                    attendee_name = f"{ticket.holder_first_name} {ticket.holder_last_name}".strip()
+                    if not attendee_name:
+                        attendee_name = "Estimado/a"
+                    
+                    success = await email_service.send_ticket_email(
+                        to_email=email,
+                        attendee_name=attendee_name,
+                        event_name=event.name,
+                        event_date=event_date_str,
+                        event_location=event_location_str,
+                        ticket_id=str(ticket.id)[:8].upper(),
+                        qr_signature=ticket.qr_signature  # Pasar QR signature para generar imagen
+                    )
+                    
+                    if success:
+                        emails_sent += 1
+                    else:
+                        emails_failed += 1
+                except Exception as e:
+                    print(f"Error enviando email para ticket {ticket.id}: {e}")
+                    emails_failed += 1
         
         return {
             "success": True,
             "order_id": str(order.id),
             "email": target_email,
             "tickets_count": len(tickets),
-            "ticket_ids": [str(t.id) for t in tickets],
-            "message": "⚠️ Servicio de email no configurado. Los tickets están listos pero no se enviaron.",
-            "note": "Configura EMAIL_PROVIDER y EMAIL_API_KEY en .env para habilitar envío de emails"
+            "emails_sent": emails_sent,
+            "emails_failed": emails_failed,
+            "message": f"Se enviaron {emails_sent} email(s) con {len(tickets)} ticket(s)" if emails_sent > 0 else f"Error: No se pudieron enviar los emails ({emails_failed} fallos)"
         }
         
     except HTTPException:

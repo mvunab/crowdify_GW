@@ -24,6 +24,8 @@ passlib = {extras = ["bcrypt"], version = "^1.7.4"}
 python-multipart = "^0.0.6"
 mercadopago = "^2.2.0"
 sendgrid = "^6.11.0"
+resend = "^2.0.0"
+qrcode = {extras = ["pil"], version = "^7.4.2"}
 slowapi = "^0.1.9"
 python-dotenv = "^1.0.0"
 httpx = "^0.25.2"
