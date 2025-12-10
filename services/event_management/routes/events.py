@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional, Dict
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 from shared.database.session import get_db
@@ -52,8 +52,8 @@ def _serialize_events(events: List) -> List[Dict]:
             "name": event.name,
             "location_text": getattr(event, 'location_text', None),
             "point_location": str(getattr(event, 'point_location', None)) if getattr(event, 'point_location', None) else None,
-            "starts_at": event.starts_at.isoformat() if event.starts_at else None,
-            "ends_at": getattr(event, 'ends_at', None).isoformat() if getattr(event, 'ends_at', None) else None,
+            "starts_at": event.starts_at.isoformat() if event.starts_at else None,  # Hora de Chile directamente
+            "ends_at": getattr(event, 'ends_at', None).isoformat() if getattr(event, 'ends_at', None) else None,  # Hora de Chile directamente
             "capacity_total": event.capacity_total,
             "capacity_available": event.capacity_available,
             "allow_children": getattr(event, 'allow_children', False),
@@ -146,6 +146,7 @@ async def get_events(
     )
 
     # Convertir eventos a EventResponse
+    # Las fechas starts_at y ends_at ya son hora de Chile directamente (sin timezone)
     events_response = [
         EventResponse(
             id=str(event.id),
@@ -153,8 +154,8 @@ async def get_events(
             name=event.name,
             location_text=getattr(event, 'location_text', None),
             point_location=getattr(event, 'point_location', None),
-            starts_at=event.starts_at,
-            ends_at=getattr(event, 'ends_at', None),
+            starts_at=event.starts_at,  # Ya es hora de Chile directamente
+            ends_at=getattr(event, 'ends_at', None),  # Ya es hora de Chile directamente
             capacity_total=event.capacity_total,
             capacity_available=event.capacity_available,
             allow_children=getattr(event, 'allow_children', False),
@@ -233,14 +234,15 @@ async def get_event(
             detail="Evento no encontrado"
         )
 
+    # Las fechas starts_at y ends_at ya son hora de Chile directamente (sin timezone)
     return EventResponse(
         id=str(event.id),
         organizer_id=str(event.organizer_id),
         name=event.name,
         location_text=getattr(event, 'location_text', None),
         point_location=getattr(event, 'point_location', None),
-        starts_at=event.starts_at,
-        ends_at=getattr(event, 'ends_at', None),
+        starts_at=event.starts_at,  # Ya es hora de Chile directamente
+        ends_at=getattr(event, 'ends_at', None),  # Ya es hora de Chile directamente
         capacity_total=event.capacity_total,
         capacity_available=event.capacity_available,
         allow_children=getattr(event, 'allow_children', False),

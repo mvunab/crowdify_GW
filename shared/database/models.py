@@ -52,8 +52,8 @@ class Event(Base):
     name = Column(String, nullable=False)
     location_text = Column(String, nullable=False)  # NOT NULL en Supabase
     point_location = Column(String, nullable=True)  # Nueva columna en Supabase
-    starts_at = Column(DateTime(timezone=True), nullable=False)
-    ends_at = Column(DateTime(timezone=True), nullable=False)  # NOT NULL en Supabase
+    starts_at = Column(DateTime(timezone=False), nullable=False)  # Hora de Chile directamente (sin timezone)
+    ends_at = Column(DateTime(timezone=False), nullable=False)  # Hora de Chile directamente (sin timezone)
     capacity_total = Column(Integer, nullable=False, server_default="0")
     capacity_available = Column(Integer, nullable=False, server_default="0")
     allow_children = Column(Boolean, nullable=True, server_default="false")

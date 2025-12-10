@@ -1,6 +1,6 @@
 """Servicio principal de compra de tickets"""
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from typing import List, Dict, Optional
 from datetime import datetime, date
 import uuid
@@ -1297,6 +1297,39 @@ class PurchaseService:
         # order.commission_total = commission_total
         # ------------------------------------
         await db.flush()
+        
+        # ✅ ACTUALIZAR capacity_available de los eventos
+        # Agrupar tickets por evento para actualizar capacity_available correctamente
+        from collections import defaultdict
+        tickets_by_event = defaultdict(int)
+        for ticket in tickets:
+            tickets_by_event[ticket.event_id] += 1
+        
+        # Actualizar capacity_available para cada evento
+        for event_id, tickets_count in tickets_by_event.items():
+            stmt_event = select(Event).where(Event.id == event_id)
+            result_event = await db.execute(stmt_event)
+            event = result_event.scalar_one_or_none()
+            
+            if event:
+                # Calcular capacity_available correctamente: capacity_total - tickets_issued
+                # Contar todos los tickets emitidos (status = 'issued') para este evento
+                stmt_tickets_count = select(func.count(Ticket.id)).where(
+                    Ticket.event_id == event_id,
+                    Ticket.status == 'issued'
+                )
+                result_tickets_count = await db.execute(stmt_tickets_count)
+                total_tickets_issued = result_tickets_count.scalar() or 0
+                
+                # Calcular capacity_available basándose en capacity_total - tickets_issued
+                new_capacity_available = max(0, event.capacity_total - total_tickets_issued)
+                old_capacity_available = event.capacity_available
+                event.capacity_available = new_capacity_available
+                
+                print(f"✅ [_generate_tickets] Actualizado capacity_available para evento {event_id}: {old_capacity_available} -> {new_capacity_available} (capacity_total: {event.capacity_total}, tickets_issued: {total_tickets_issued})")
+                await db.flush()
+            else:
+                print(f"⚠️  [_generate_tickets] No se encontró el evento {event_id} para actualizar capacity_available")
         
         return tickets
     

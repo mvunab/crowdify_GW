@@ -1,7 +1,7 @@
 """Modelos Pydantic para eventos"""
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
 
@@ -54,6 +54,29 @@ class EventResponse(BaseModel):
     event_services: List[EventServiceResponse] = []
     created_at: datetime
     updated_at: Optional[datetime] = None
+
+    @field_serializer('starts_at', 'ends_at')
+    def serialize_datetime(self, dt: Optional[datetime], _info) -> Optional[str]:
+        """Serializar datetime a ISO 8601 - hora de Chile directamente (sin timezone)"""
+        if dt is None:
+            return None
+        # La hora en la BD es hora de Chile directamente, devolverla como ISO sin timezone
+        # Si tiene timezone, removerlo
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        return dt.isoformat()
+    
+    @field_serializer('created_at', 'updated_at')
+    def serialize_datetime_utc(self, dt: Optional[datetime], _info) -> Optional[str]:
+        """Serializar datetime a ISO 8601 con timezone UTC explícito (para timestamps del sistema)"""
+        if dt is None:
+            return None
+        # Asegurar que el datetime tenga timezone UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        elif dt.tzinfo != timezone.utc:
+            dt = dt.astimezone(timezone.utc)
+        return dt.isoformat()
 
     class Config:
         from_attributes = True
