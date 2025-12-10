@@ -690,21 +690,24 @@ class PurchaseService:
                                 "unit_price": float(service.price)
                             })
                 
-                # Agregar comisión de servicio por cada entrada
+                # --- COMISIONES BLOQUE COMPLETO - COMENTADO TEMPORALMENTE ---
+                # Las comisiones ya están incluidas en el precio del ticket por los administradores
                 # Comisión: 1500 CLP por cada entrada (adulto o niño)
-                COMMISSION_PER_TICKET = 1500.0
-                
-                if total_quantity > 0:
-                    items.append({
-                        "title": "Comisión de servicio",
-                        "description": f"Comisión de procesamiento por entrada ({total_quantity} entrada(s))",
-                        "quantity": total_quantity,  # Una comisión por cada entrada
-                        "unit_price": float(COMMISSION_PER_TICKET)  # 1500 CLP por entrada
-                    })
-                
-                commission_total = total_quantity * COMMISSION_PER_TICKET
+                # COMMISSION_PER_TICKET = 1500.0
+                # 
+                # if total_quantity > 0:
+                #     items.append({
+                #         "title": "Comisión de servicio",
+                #         "description": f"Comisión de procesamiento por entrada ({total_quantity} entrada(s))",
+                #         "quantity": total_quantity,  # Una comisión por cada entrada
+                #         "unit_price": float(COMMISSION_PER_TICKET)  # 1500 CLP por entrada
+                #     })
+                # 
+                # commission_total = total_quantity * COMMISSION_PER_TICKET
+                # print(f"[DEBUG] Items para preferencia: {items}")
+                # print(f"[DEBUG] Comisiones: {total_quantity} entrada(s) × {COMMISSION_PER_TICKET} CLP = {commission_total} CLP")
+                # ------------------------------------
                 print(f"[DEBUG] Items para preferencia: {items}")
-                print(f"[DEBUG] Comisiones: {total_quantity} entrada(s) × {COMMISSION_PER_TICKET} CLP = {commission_total} CLP")
                 
                 # Obtener información del primer attendee para la preferencia
                 payer_email = None
@@ -1197,7 +1200,10 @@ class PurchaseService:
                 raise ValueError(f"No se encontraron datos de attendees para orden {order.id}")
         
         tickets = []
-        commission_total = 0.0
+        # --- COMISIONES BLOQUE COMPLETO - COMENTADO TEMPORALMENTE ---
+        # Las comisiones ya están incluidas en el precio del ticket por los administradores
+        # commission_total = 0.0
+        # ------------------------------------
         attendee_index = 0  # Índice global para rastrear qué attendee corresponde a cada ticket
         
         # CRÍTICO: Cargar order_items explícitamente desde la base de datos
@@ -1265,25 +1271,31 @@ class PurchaseService:
                     child_details_data = attendee_data["child_details"]
                     await self._create_child_details(db, ticket, child_details_data)
                 
+                # --- COMISIONES BLOQUE COMPLETO - COMENTADO TEMPORALMENTE ---
+                # Las comisiones ya están incluidas en el precio del ticket por los administradores
                 # Calcular comisión: 1500 CLP por cada entrada (adulto o niño)
-                commission_amount = 1500.0  # CLP por entrada
-                
-                commission_total += commission_amount
-                
-                # Crear registro de comisión
-                commission = OrderCommission(
-                    id=uuid.uuid4(),
-                    order_id=order.id,
-                    ticket_id=ticket.id,
-                    ticket_type="child" if attendee_data.get("is_child") else "adult",
-                    commission_amount=commission_amount
-                )
-                db.add(commission)
+                # commission_amount = 1500.0  # CLP por entrada
+                # 
+                # commission_total += commission_amount
+                # 
+                # # Crear registro de comisión
+                # commission = OrderCommission(
+                #     id=uuid.uuid4(),
+                #     order_id=order.id,
+                #     ticket_id=ticket.id,
+                #     ticket_type="child" if attendee_data.get("is_child") else "adult",
+                #     commission_amount=commission_amount
+                # )
+                # db.add(commission)
+                # ------------------------------------
                 
                 tickets.append(ticket)
         
+        # --- COMISIONES BLOQUE COMPLETO - COMENTADO TEMPORALMENTE ---
+        # Las comisiones ya están incluidas en el precio del ticket por los administradores
         # Actualizar commission_total en la orden
-        order.commission_total = commission_total
+        # order.commission_total = commission_total
+        # ------------------------------------
         await db.flush()
         
         return tickets

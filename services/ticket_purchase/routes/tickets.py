@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 import uuid
 from shared.database.session import get_db
 from shared.auth.dependencies import get_current_user
-from shared.database.models import Ticket, Order, OrderItem, Event
+from shared.database.models import Ticket, Order, OrderItem, Event, TicketType
 
 
 router = APIRouter()
@@ -123,10 +123,12 @@ async def get_tickets_by_email(
             detail="Formato de email inválido"
         )
     
-    # Buscar tickets por email (case-insensitive)
+    # Buscar tickets por email (case-insensitive) incluyendo TicketType para obtener el precio
     stmt = (
-        select(Ticket, Event)
+        select(Ticket, Event, OrderItem, TicketType)
+        .join(OrderItem, Ticket.order_item_id == OrderItem.id)
         .join(Event, Ticket.event_id == Event.id)
+        .join(TicketType, OrderItem.ticket_type_id == TicketType.id)
         .where(func.lower(func.trim(Ticket.holder_email)) == normalized_email)
         .order_by(Ticket.created_at.desc())
     )
@@ -137,7 +139,7 @@ async def get_tickets_by_email(
     if not rows:
         return []
     
-    # Formatear respuesta con datos del evento
+    # Formatear respuesta con datos del evento y precio del ticket_type
     return [
         {
             'id': str(ticket.id),
@@ -163,7 +165,7 @@ async def get_tickets_by_email(
             'purchaseDate': ticket.issued_at.isoformat() if ticket.issued_at else None,
             'created_at': ticket.created_at.isoformat() if ticket.created_at else None,
             'updated_at': ticket.updated_at.isoformat() if ticket.updated_at else None,
-            # Datos del evento embebidos
+            # Datos del evento embebidos con precio del ticket_type
             'event': {
                 'id': str(event.id),
                 'title': event.name,
@@ -171,6 +173,7 @@ async def get_tickets_by_email(
                 'name': event.name,
                 'location': event.location_text,
                 'location_text': event.location_text,
+                'lugar': event.location_text,  # Compatibilidad
                 'date': event.starts_at.isoformat() if event.starts_at else None,
                 'time': event.starts_at.strftime('%H:%M') if event.starts_at else None,
                 'starts_at': event.starts_at.isoformat() if event.starts_at else None,
@@ -178,10 +181,11 @@ async def get_tickets_by_email(
                 'image_url': event.image_url,
             'category': event.category,
             'capacity_total': event.capacity_total,
-            'allow_children': event.allow_children
+            'allow_children': event.allow_children,
+            'price': float(ticket_type.price) if ticket_type else None  # Precio del ticket_type
         }
     }
-    for ticket, event in rows
+    for ticket, event, order_item, ticket_type in rows
 ]
 
 
@@ -209,12 +213,13 @@ async def get_tickets_by_order(
             detail="order_id inválido"
         )
     
-    # Query optimizada: filtrar directamente en BD con join
+    # Query optimizada: filtrar directamente en BD con join incluyendo TicketType para obtener el precio
     stmt = (
-        select(Ticket, Event)
+        select(Ticket, Event, OrderItem, TicketType)
         .join(OrderItem, Ticket.order_item_id == OrderItem.id)
         .join(Order, OrderItem.order_id == Order.id)
         .join(Event, Ticket.event_id == Event.id)
+        .join(TicketType, OrderItem.ticket_type_id == TicketType.id)
         .where(Order.id == order_uuid)
         .where(Ticket.status == "issued")  # Solo tickets emitidos
         .order_by(Ticket.created_at.desc())  # Más recientes primero
@@ -226,7 +231,7 @@ async def get_tickets_by_order(
     if not rows:
         return []
     
-    # Formatear respuesta con datos del evento
+    # Formatear respuesta con datos del evento y precio del ticket_type
     return [
         {
             'id': str(ticket.id),
@@ -254,7 +259,7 @@ async def get_tickets_by_order(
             'created_at': ticket.created_at.isoformat() if ticket.created_at else None,
             'createdAt': ticket.created_at.isoformat() if ticket.created_at else None,  # Alias para frontend
             'updated_at': ticket.updated_at.isoformat() if ticket.updated_at else None,
-            # Datos del evento embebidos
+            # Datos del evento embebidos con precio del ticket_type
             'event': {
                 'id': str(event.id),
                 'title': event.name,
@@ -262,6 +267,7 @@ async def get_tickets_by_order(
                 'name': event.name,
                 'location': event.location_text,
                 'location_text': event.location_text,
+                'lugar': event.location_text,  # Compatibilidad
                 'date': event.starts_at.isoformat() if event.starts_at else None,
                 'time': event.starts_at.strftime('%H:%M') if event.starts_at else None,
                 'starts_at': event.starts_at.isoformat() if event.starts_at else None,
@@ -269,8 +275,9 @@ async def get_tickets_by_order(
                 'image_url': event.image_url,
                 'category': event.category,
                 'capacity_total': event.capacity_total,
-                'allow_children': event.allow_children
+                'allow_children': event.allow_children,
+                'price': float(ticket_type.price) if ticket_type else None  # Precio del ticket_type
             }
         }
-        for ticket, event in rows
+        for ticket, event, order_item, ticket_type in rows
     ]
