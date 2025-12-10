@@ -1,6 +1,6 @@
 # Crowdify GW — FastAPI + Celery + PDF Service
 
-Backend para venta y validación de tickets, con servicios auxiliares (PDF, Mailhog, MinIO, Redis y Postgres) orquestados con Docker Compose.
+Backend para venta y validación de tickets, con servicios auxiliares (PDF, MinIO, Redis y Postgres) orquestados con Docker Compose.
 
 ## Requisitos
 
@@ -76,9 +76,10 @@ Servicios y puertos:
 - API: http://localhost:8000
 - Postgres: 5432 (usuario/clave: `tickets`/`tickets`, DB: `tickets`)
 - Redis: 6379
-- MinIO: 9000 (console 9001) — usuario/clave: `minio`/`minio12345`
-- Mailhog (SMTP dev): http://localhost:8025
+- MinIO: 9000 (console 9003) — usuario/clave: `minio`/`minio12345`
 - PDF service: http://localhost:9002
+
+**Email**: El sistema usa Resend para envío de emails. Configura `RESEND_API_KEY` en tu `.env`.
 
 Hot reload: el servicio `backend` monta el código (`.:/app`) y ejecuta `uvicorn --reload`.
 
@@ -134,6 +135,17 @@ poetry run celery -A app.worker:celery_app worker -l INFO
 ## Scripts útiles
 
 En `scripts/` tienes utilidades como `generate_env.py` (plantillas) y `generate_token.py`.
+
+## Documentación
+
+Documentación adicional disponible en `docs/`:
+- `API_DOCUMENTATION.md` - Documentación completa de la API
+- `BACKEND_README.md` - Guía detallada del backend
+- `MERCADOPAGO_SETUP.md` - Configuración de Mercado Pago
+- `PAYKU_FLUJO_COMPLETO.md` - Flujo completo de Payku
+- `RESEND_SETUP.md` - Configuración de Resend para emails
+- `WEBHOOK_CONFIGURATION.md` - Configuración de webhooks
+- `EMAIL_INTEGRATION.md` - Integración de emails
 
 ## Licencia
 

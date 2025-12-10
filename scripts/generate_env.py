@@ -101,17 +101,17 @@ def main():
         env_vars["MERCADOPAGO_WEBHOOK_SECRET"] = input("MERCADOPAGO_WEBHOOK_SECRET (opcional): ").strip()
     print()
     
-    # Email
-    print("📧 CONFIGURACIÓN DE EMAIL")
+    # Email (Resend)
+    print("📧 CONFIGURACIÓN DE EMAIL (Resend)")
     print("-" * 60)
     print("Opcional - Puedes omitir esto para desarrollo")
-    print("Opciones: SendGrid, Mailgun, o usar MailHog local")
+    print("El sistema usa Resend para envío de emails.")
+    print("Obtén tu API key en: https://resend.com/api-keys")
     print()
-    email_provider = input("EMAIL_PROVIDER (sendgrid/mailgun, Enter para omitir): ").strip().lower()
-    if email_provider:
-        env_vars["EMAIL_PROVIDER"] = email_provider
-        env_vars["EMAIL_API_KEY"] = input(f"{email_provider.upper()}_API_KEY: ").strip()
-        env_vars["EMAIL_FROM"] = input("EMAIL_FROM (ej: noreply@crodify.com): ").strip()
+    resend_key = input("RESEND_API_KEY (Enter para omitir): ").strip()
+    if resend_key:
+        env_vars["RESEND_API_KEY"] = resend_key
+        env_vars["RESEND_FROM_EMAIL"] = input("RESEND_FROM_EMAIL (default: onboarding@resend.dev): ").strip() or "onboarding@resend.dev"
     print()
     
     # CORS

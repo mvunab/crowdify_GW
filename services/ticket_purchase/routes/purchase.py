@@ -33,8 +33,8 @@ async def create_purchase(
     NOTA: user_id es opcional ahora. Si se proporciona sin autenticación, se ignora y la compra es anónima.
     Si se proporciona con autenticación, debe coincidir con el usuario autenticado.
     """
-    print(f"[DEBUG ROUTE] Request recibido - payment_method: {request.payment_method}")
-    print(f"[DEBUG ROUTE] Request completo: {request.dict()}")
+    import logging
+    logger = logging.getLogger(__name__)
     
     # Manejar user_id con try-except para mayor robustez
     try:
@@ -47,10 +47,8 @@ async def create_purchase(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="No puedes crear órdenes para otros usuarios"
                     )
-                print(f"[DEBUG ROUTE] user_id validado: {request.user_id} (usuario autenticado)")
             else:
                 # No hay autenticación: ignorar user_id y tratar como compra anónima
-                print(f"[DEBUG ROUTE] user_id proporcionado sin autenticación: {request.user_id} - Ignorando y tratando como compra anónima")
                 request.user_id = None
         else:
             # No se proporcionó user_id
@@ -67,12 +65,12 @@ async def create_purchase(
                 except HTTPException:
                     raise  # Re-lanzar HTTPException
                 except Exception as role_error:
-                    print(f"[WARNING ROUTE] Error obteniendo rol del usuario: {role_error}")
+                    logger.warning(f"Error obteniendo rol del usuario: {role_error}")
                     # Continuar sin validar rol si hay error
     except HTTPException:
         raise  # Re-lanzar HTTPException
     except Exception as validation_error:
-        print(f"[WARNING ROUTE] Error en validación de user_id: {validation_error}")
+        logger.warning(f"Error en validación de user_id: {validation_error}")
         # Si hay error, ignorar user_id y continuar como compra anónima
         request.user_id = None
     
@@ -80,25 +78,16 @@ async def create_purchase(
     
     try:
         result = await service.create_purchase(db, request)
-        print(f"[DEBUG ROUTE] Result del servicio: {result}")
-        print(f"[DEBUG ROUTE] payment_link en result: {result.get('payment_link')}")
         response = PurchaseResponse(**result)
-        print(f"[DEBUG ROUTE] PurchaseResponse creado: {response}")
-        print(f"[DEBUG ROUTE] payment_link en response: {response.payment_link}")
         return response
     except ValueError as e:
-        import traceback
-        print(f"ValueError en create_purchase: {str(e)}")
-        print(f"Traceback: {traceback.format_exc()}")
+        logger.error(f"ValueError en create_purchase: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        print(f"Exception en create_purchase: {str(e)}")
-        print(f"Traceback completo: {error_trace}")
+        logger.error(f"Exception en create_purchase: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error procesando compra: {str(e)}"
@@ -128,9 +117,9 @@ async def mercado_pago_webhook(
         # Obtener body
         data = await request.json()
         
-        print(f"🔔 [WEBHOOK] Webhook recibido!")
-        print(f"🔔 [WEBHOOK] Headers - x-signature: {signature is not None}, x-request-id: {request_id}")
-        print(f"🔔 [WEBHOOK] Body: {data}")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Webhook recibido - x-signature: {signature is not None}, x-request-id: {request_id}")
         
         # Verificar firma del webhook
         mercado_pago_service = service.mercado_pago_service
@@ -142,13 +131,12 @@ async def mercado_pago_webhook(
         )
         
         if not is_valid:
-            print("⚠️  [WEBHOOK] Webhook con firma inválida, pero procesando de todas formas (modo desarrollo)")
+            logger.warning("Webhook con firma inválida, pero procesando de todas formas (modo desarrollo)")
             # En producción, podrías retornar 401 aquí
         
         # Procesar webhook
-        print(f"🔔 [WEBHOOK] Procesando webhook...")
         success = await service.process_payment_webhook(db, data)
-        print(f"🔔 [WEBHOOK] Resultado del procesamiento: {success}")
+        logger.info(f"Webhook procesado - resultado: {success}")
         
         if success:
             return {"status": "ok"}
@@ -156,9 +144,9 @@ async def mercado_pago_webhook(
             return {"status": "ignored"}
     except Exception as e:
         # Log error pero retornar 200 para que Mercado Pago no reintente inmediatamente
-        print(f"Error procesando webhook: {e}")
-        import traceback
-        traceback.print_exc()
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error procesando webhook: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
 
 
@@ -178,19 +166,18 @@ async def payku_webhook(
         # Obtener body
         data = await request.json()
         
-        print(f"🔔 [WEBHOOK PAYKU] Webhook recibido!")
-        print(f"🔔 [WEBHOOK PAYKU] Body: {data}")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("Webhook Payku recibido")
         
         # Procesar webhook de Payku
         payku_service = service.payku_service
         webhook_info = payku_service.process_webhook(data)
         
-        print(f"🔔 [WEBHOOK PAYKU] Webhook procesado: {webhook_info}")
-        
         # Obtener order_id del webhook
         order_id = webhook_info.get("order_id")
         if not order_id:
-            print("⚠️  [WEBHOOK PAYKU] No se encontró order_id en el webhook")
+            logger.warning("No se encontró order_id en el webhook Payku")
             return {"status": "ignored", "message": "No order_id found"}
         
         # Buscar orden

@@ -1,10 +1,14 @@
 """Rutas adicionales para tickets de usuario"""
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from typing import List, Dict, Optional
+from io import BytesIO
 import uuid
+import httpx
+import os
 from shared.database.session import get_db
 from shared.auth.dependencies import get_current_user
 from shared.database.models import Ticket, Order, OrderItem, Event, TicketType
@@ -281,3 +285,107 @@ async def get_tickets_by_order(
         }
         for ticket, event, order_item, ticket_type in rows
     ]
+
+
+@router.get("/{ticket_id}/pdf")
+async def download_ticket_pdf(
+    ticket_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Descarga el PDF de un ticket
+    
+    - Si existe pdf_object_key, descargar de MinIO (futuro)
+    - Si no existe, generar PDF on-demand llamando a pdfsvc
+    - Opcionalmente guardar en MinIO y actualizar pdf_object_key (futuro)
+    """
+    from uuid import UUID
+    
+    try:
+        # Validar que ticket_id es un UUID válido
+        ticket_uuid = UUID(ticket_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ticket_id inválido"
+        )
+    
+    # Obtener ticket con evento de la BD
+    stmt = (
+        select(Ticket, Event)
+        .join(Event, Ticket.event_id == Event.id)
+        .where(Ticket.id == ticket_uuid)
+    )
+    
+    result = await db.execute(stmt)
+    row = result.first()
+    
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ticket no encontrado"
+        )
+    
+    ticket, event = row
+    
+    # TODO: Si tiene pdf_object_key, descargar de MinIO
+    # Por ahora, siempre generar on-demand
+    
+    # Preparar datos para el servicio de PDF
+    pdfsvc_url = os.getenv("PDFSVC_URL", "http://pdfsvc:9002")
+    
+    ticket_data = {
+        "ticket_id": str(ticket.id),
+        "qr_signature": ticket.qr_signature,
+        "holder_first_name": ticket.holder_first_name,
+        "holder_last_name": ticket.holder_last_name,
+        "holder_email": ticket.holder_email,
+        "issued_at": ticket.issued_at.isoformat() if ticket.issued_at else None,
+        "event": {
+            "name": event.name,
+            "title": event.name,
+            "nombre": event.name,
+            "starts_at": event.starts_at.isoformat() if event.starts_at else None,
+            "ends_at": event.ends_at.isoformat() if event.ends_at else None,
+            "date": event.starts_at.isoformat() if event.starts_at else None,
+            "time": event.starts_at.strftime('%H:%M') if event.starts_at else None,
+            "location_text": event.location_text,
+            "location": event.location_text,
+            "lugar": event.location_text,
+            "image_url": event.image_url,
+            "category": event.category,
+        }
+    }
+    
+    try:
+        # Llamar al servicio de PDF
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{pdfsvc_url}/tickets/pdf",
+                json=ticket_data
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Error generando PDF"
+                )
+            
+            # Retornar PDF como streaming response
+            return StreamingResponse(
+                BytesIO(response.content),
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"attachment; filename=ticket-{ticket_id}.pdf"
+                }
+            )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Timeout generando PDF"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generando PDF: {str(e)}"
+        )

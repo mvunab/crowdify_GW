@@ -57,8 +57,36 @@ docs/
 .env.*
 !.env.example
 
-# Poetry (no necesitamos esto en la imagen)
-poetry.lock
+# Poetry cache (excluir cache pero incluir poetry.lock para builds reproducibles)
+.poetry/
+poetry.toml
 
 # Logs
 *.log
+
+# Screenshots y archivos temporales
+screenshots/
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Scripts de deployment (no necesarios en imagen)
+scripts/
+deploy.sh
+*.sh
+!update_ngrok_url.sh
+
+# Docker files (no necesarios dentro de la imagen)
+docker-compose*.yml
+Dockerfile
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Archivos de configuración local
+Makefile
+.env.local
+.env.*.local

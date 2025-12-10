@@ -59,10 +59,6 @@ class PurchaseService:
         is_bank_transfer = payment_method == "bank_transfer"
         is_payku = payment_method == "payku"
         
-        print(f"[DEBUG SERVICE] Payment method recibido: {payment_method}")
-        print(f"[DEBUG SERVICE] Is bank transfer: {is_bank_transfer}")
-        print(f"[DEBUG SERVICE] Is payku: {is_payku}")
-        
         # Generar idempotency_key base (sin payment_method)
         base_idempotency_key = request.idempotency_key or self._generate_idempotency_key(request)
         
@@ -71,37 +67,29 @@ class PurchaseService:
         import hashlib
         idempotency_key = hashlib.sha256(f"{base_idempotency_key}:{payment_method}".encode()).hexdigest()
         
-        print(f"[DEBUG SERVICE] Base idempotency_key: {base_idempotency_key}")
-        print(f"[DEBUG SERVICE] Final idempotency_key (con payment_method): {idempotency_key}")
-        
         # Incluir payment_method en el cache key para diferenciar por método de pago
         cache_key = f"purchase:idempotency:{idempotency_key}"
         
         # Verificar idempotencia en cache
         cached = await cache_get(cache_key)
         if cached:
-            print(f"[DEBUG SERVICE] Orden encontrada en cache: {cached}")
-            
             # Si es Payku, verificar que la transacción aún sea válida
             if is_payku and cached.get("transaction_id"):
                 try:
                     transaction_data = self.payku_service.verify_transaction(cached["transaction_id"])
                     transaction_status = transaction_data.get("status", "").lower()
                     
-                    print(f"[DEBUG SERVICE] Estado de transacción Payku en cache: {transaction_status}")
-                    
                     # Si la transacción ya fue pagada o rechazada, invalidar cache y continuar
                     if transaction_status in ["success", "completed", "approved", "failed", "rejected", "cancelled"]:
-                        print(f"[WARNING] Transacción Payku en cache ya fue procesada ({transaction_status}). Invalidando cache...")
+                        logger.warning(f"Transacción Payku en cache ya fue procesada ({transaction_status}). Invalidando cache.")
                         from shared.cache.redis_client import cache_delete
                         await cache_delete(cache_key)
                         cached = None  # Continuar con la creación/verificación normal
                     # Si está pendiente, usar el cache
                     elif transaction_status in ["pending"]:
-                        print(f"[DEBUG SERVICE] Transacción Payku aún pendiente. Usando cache.")
                         return cached
                 except Exception as e:
-                    print(f"[WARNING] Error verificando transacción Payku en cache: {str(e)}")
+                    logger.warning(f"Error verificando transacción Payku en cache: {str(e)}")
                     # Si falla la verificación, invalidar cache por seguridad
                     from shared.cache.redis_client import cache_delete
                     await cache_delete(cache_key)
@@ -122,20 +110,14 @@ class PurchaseService:
         except Exception as db_error:
             # Error de conexión a la base de datos
             error_msg = str(db_error)
-            print(f"[ERROR SERVICE] ❌ Error conectando a la base de datos: {error_msg}")
-            print(f"[ERROR SERVICE] ❌ Esto puede ser un problema temporal de red o la base de datos está caída")
-            print(f"[ERROR SERVICE] ❌ Verifica que la base de datos esté disponible y que DATABASE_URL sea correcta")
+            logger.error(f"Error conectando a la base de datos: {error_msg}")
             # Re-lanzar el error para que el endpoint retorne 500
             raise Exception(f"Error de conexión a la base de datos: {error_msg}. Verifica que la base de datos esté disponible.")
         
         if existing_order:
-            print(f"[DEBUG SERVICE] Orden existente encontrada: {existing_order.id}")
-            print(f"[DEBUG SERVICE] Payment provider de orden existente: {existing_order.payment_provider}")
-            
             # Si el método de pago del request NO coincide con el de la orden existente,
             # crear una nueva orden (no usar idempotencia en este caso)
             if existing_order.payment_provider != payment_method:
-                print(f"[DEBUG SERVICE] Método de pago diferente. Creando nueva orden...")
                 # Continuar con la creación de una nueva orden
                 existing_order = None
             else:
@@ -202,11 +184,9 @@ class PurchaseService:
                             transaction_data = self.payku_service.verify_transaction(existing_order.payment_reference)
                             transaction_status = transaction_data.get("status", "").lower()
                             
-                            print(f"[DEBUG SERVICE] Estado de transacción Payku existente: {transaction_status}")
-                            
                             # Si la transacción ya fue pagada, rechazada o cancelada, invalidar orden y crear nueva
                             if transaction_status in ["success", "completed", "approved", "failed", "rejected", "cancelled"]:
-                                print(f"[WARNING] Transacción Payku {existing_order.payment_reference} ya fue procesada ({transaction_status}). Invalidando orden y creando nueva...")
+                                logger.warning(f"Transacción Payku {existing_order.payment_reference} ya fue procesada ({transaction_status}). Invalidando orden y creando nueva.")
                                 # Invalidar cache y orden existente para crear una nueva orden
                                 from shared.cache.redis_client import cache_delete
                                 await cache_delete(cache_key)
@@ -215,13 +195,12 @@ class PurchaseService:
                                 timestamp = int(time.time() * 1000)  # Timestamp en milisegundos
                                 idempotency_key = hashlib.sha256(f"{base_idempotency_key}:{payment_method}:{timestamp}".encode()).hexdigest()
                                 cache_key = f"purchase:idempotency:{idempotency_key}"  # Actualizar cache_key también
-                                print(f"[DEBUG SERVICE] Nuevo idempotency_key generado: {idempotency_key}")
                                 existing_order = None  # Forzar creación de nueva orden
                                 payment_link = None
                             else:
                                 # Transacción pendiente, pero Payku no devuelve el payment_link en verify_transaction
                                 # Necesitamos crear una nueva transacción con un nuevo order_id
-                                print(f"[WARNING] Transacción Payku pendiente pero no tenemos payment_link. Invalidando orden para crear nueva...")
+                                logger.warning("Transacción Payku pendiente pero no tenemos payment_link. Invalidando orden para crear nueva.")
                                 from shared.cache.redis_client import cache_delete
                                 await cache_delete(cache_key)
                                 # Generar nuevo idempotency_key para la nueva orden (agregar timestamp)
@@ -229,12 +208,10 @@ class PurchaseService:
                                 timestamp = int(time.time() * 1000)  # Timestamp en milisegundos
                                 idempotency_key = hashlib.sha256(f"{base_idempotency_key}:{payment_method}:{timestamp}".encode()).hexdigest()
                                 cache_key = f"purchase:idempotency:{idempotency_key}"  # Actualizar cache_key también
-                                print(f"[DEBUG SERVICE] Nuevo idempotency_key generado: {idempotency_key}")
                                 existing_order = None  # Forzar creación de nueva orden
                                 payment_link = None
                         except Exception as e:
-                            print(f"[WARNING] No se pudo verificar transacción Payku existente: {str(e)}")
-                            print(f"[WARNING] Invalidando orden y creando nueva...")
+                            logger.warning(f"No se pudo verificar transacción Payku existente: {str(e)}. Invalidando orden y creando nueva.")
                             # Si falla la verificación, invalidar y crear nueva orden
                             from shared.cache.redis_client import cache_delete
                             await cache_delete(cache_key)
@@ -243,14 +220,13 @@ class PurchaseService:
                             timestamp = int(time.time() * 1000)  # Timestamp en milisegundos
                             idempotency_key = hashlib.sha256(f"{base_idempotency_key}:{payment_method}:{timestamp}".encode()).hexdigest()
                             cache_key = f"purchase:idempotency:{idempotency_key}"  # Actualizar cache_key también
-                            print(f"[DEBUG SERVICE] Nuevo idempotency_key generado: {idempotency_key}")
                             existing_order = None
                             payment_link = None
                     
                     # Si no tiene payment_reference, invalidar y crear nueva orden
                     if not existing_order or not payment_link:
                         if existing_order:
-                            print(f"[WARNING] Orden existente sin payment_reference válido. Invalidando y creando nueva orden...")
+                            logger.warning("Orden existente sin payment_reference válido. Invalidando y creando nueva orden.")
                             from shared.cache.redis_client import cache_delete
                             await cache_delete(cache_key)
                             # Generar nuevo idempotency_key para la nueva orden (agregar timestamp)
@@ -258,7 +234,6 @@ class PurchaseService:
                             timestamp = int(time.time() * 1000)  # Timestamp en milisegundos
                             idempotency_key = hashlib.sha256(f"{base_idempotency_key}:{payment_method}:{timestamp}".encode()).hexdigest()
                             cache_key = f"purchase:idempotency:{idempotency_key}"  # Actualizar cache_key también
-                            print(f"[DEBUG SERVICE] Nuevo idempotency_key generado: {idempotency_key}")
                             existing_order = None
                         payment_link = None
                 
@@ -277,8 +252,7 @@ class PurchaseService:
                                 )
                                 
                                 if not has_valid_back_urls:
-                                    print(f"[WARNING] Preferencia existente tiene back_urls inválidas, creando nueva preferencia")
-                                    print(f"[WARNING] back_urls actuales: {back_urls}")
+                                    logger.warning(f"Preferencia existente tiene back_urls inválidas, creando nueva preferencia. back_urls actuales: {back_urls}")
                                     payment_link = None
                                 else:
                                     # En sandbox, usar sandbox_init_point si está disponible
@@ -290,7 +264,7 @@ class PurchaseService:
                             else:
                                 payment_link = None
                         except Exception as e:
-                            print(f"[WARNING] No se pudo obtener payment_link de preferencia existente: {str(e)}")
+                            logger.warning(f"No se pudo obtener payment_link de preferencia existente: {str(e)}")
                             # Si falla, intentar crear una nueva preferencia
                             payment_link = None
                     
@@ -353,9 +327,7 @@ class PurchaseService:
                             payment_link = preference["payment_link"]
                             await db.commit()
                         except Exception as e:
-                            print(f"[ERROR] Error creando preferencia para orden existente: {str(e)}")
-                            import traceback
-                            print(traceback.format_exc())
+                            logger.error(f"Error creando preferencia para orden existente: {str(e)}", exc_info=True)
                             # No propagar el error, simplemente retornar sin payment_link
                             # para que el frontend pueda manejar el error
                             payment_link = None
@@ -523,10 +495,7 @@ class PurchaseService:
         if not is_bank_transfer and order.idempotency_key:
             attendees_cache_key = f"purchase:attendees:{order.idempotency_key}"
             await cache_set(attendees_cache_key, attendees_data, expire=86400)  # 24 horas
-            print(f"[DEBUG SERVICE] ✅ Datos de attendees guardados en cache: {attendees_cache_key}")
-            print(f"[DEBUG SERVICE]   - Attendees count: {len(attendees_data)}")
-            print(f"[DEBUG SERVICE]   - Payment method: {payment_method}")
-            print(f"[DEBUG SERVICE]   - Order idempotency_key: {order.idempotency_key}")
+            # Datos de attendees guardados en cache (no loguear en producción)
         
         # Reservar capacidad
         reserved = await self.inventory_service.reserve_capacity(
@@ -579,8 +548,7 @@ class PurchaseService:
                 # Si falla la creación de tickets, liberar capacidad y rollback
                 import traceback
                 error_trace = traceback.format_exc()
-                print(f"Error creando tickets para transferencia bancaria: {str(e)}")
-                print(f"Traceback: {error_trace}")
+                logger.error(f"Error creando tickets para transferencia bancaria: {str(e)}", exc_info=True)
                 await self.inventory_service.release_capacity(
                     db, request.event_id, total_quantity, "ticket_creation_failed"
                 )
@@ -590,8 +558,7 @@ class PurchaseService:
         # Si es Payku, crear transacción de pago
         elif is_payku:
             try:
-                print(f"[DEBUG] Creando transacción de Payku para orden {order.id}")
-                print(f"[DEBUG] Payment method recibido: {payment_method}")
+                # Creando transacción de Payku
                 
                 # Obtener información del primer attendee para la transacción
                 payer_email = None
@@ -630,8 +597,7 @@ class PurchaseService:
                 # Si falla la creación de transacción, liberar capacidad y rollback
                 import traceback
                 error_trace = traceback.format_exc()
-                print(f"[ERROR] Error creando transacción de pago: {str(e)}")
-                print(f"[ERROR] Traceback: {error_trace}")
+                logger.error(f"Error creando transacción de pago: {str(e)}", exc_info=True)
                 await self.inventory_service.release_capacity(
                     db, request.event_id, total_quantity, "payment_creation_failed"
                 )
@@ -649,7 +615,7 @@ class PurchaseService:
                 "payment_method": "payku"
             }
             
-            print(f"[DEBUG] Response final: {response}")
+            # Response final preparado
             
             # Guardar en cache para idempotencia
             await cache_set(cache_key, response, expire=3600)
@@ -659,7 +625,7 @@ class PurchaseService:
         # Si es Mercado Pago, crear preferencia de pago
         else:
             try:
-                print(f"[DEBUG] Creando preferencia de Mercado Pago para orden {order.id}")
+                # Creando preferencia de Mercado Pago
                 print(f"[DEBUG] Payment method recibido: {payment_method}")
                 
                 # Construir items para la preferencia (tickets + servicios + comisiones)
@@ -779,7 +745,7 @@ class PurchaseService:
                 "payment_method": "mercadopago"
             }
             
-            print(f"[DEBUG] Response final: {response}")
+            # Response final preparado
             
             # Guardar en cache para idempotencia
             await cache_set(cache_key, response, expire=3600)
@@ -925,7 +891,14 @@ class PurchaseService:
         consulta activamente a Payku para verificar el estado real
         y actualiza la base de datos si es necesario.
         """
-        stmt = select(Order).where(Order.id == order_id)
+        from sqlalchemy.orm import selectinload
+        stmt = (
+            select(Order)
+            .where(Order.id == order_id)
+            .options(
+                selectinload(Order.order_service_items).selectinload(OrderServiceItem.service)
+            )
+        )
         result = await db.execute(stmt)
         order = result.scalar_one_or_none()
         
@@ -955,7 +928,25 @@ class PurchaseService:
                             if cache_age < 30:
                                 print(f"🔍 [CACHE] Usando cache de verificación Payku para {order.payment_reference} (age: {cache_age:.1f}s)")
                                 # No consultar Payku, usar estado local
-                                await db.refresh(order)
+                                await db.refresh(order, ["order_service_items"])
+                                # Cargar servicios si no están cargados
+                                if order.order_service_items:
+                                    for service_item in order.order_service_items:
+                                        if not service_item.service:
+                                            await db.refresh(service_item, ["service"])
+                                
+                                # Obtener servicios de la orden
+                                services_list = []
+                                if order.order_service_items:
+                                    for service_item in order.order_service_items:
+                                        services_list.append({
+                                            "service_id": str(service_item.service_id),
+                                            "service_name": service_item.service.name if service_item.service else "Servicio",
+                                            "quantity": service_item.quantity,
+                                            "unit_price": float(service_item.unit_price),
+                                            "total_price": float(service_item.final_price)
+                                        })
+                                
                                 return {
                                     "order_id": str(order.id),
                                     "status": order.status,
@@ -965,7 +956,8 @@ class PurchaseService:
                                     "payment_reference": order.payment_reference,
                                     "created_at": order.created_at,
                                     "paid_at": order.paid_at,
-                                    "attendees_data": order.attendees_data
+                                    "attendees_data": order.attendees_data,
+                                    "services": services_list if services_list else None
                                 }
                         except Exception as cache_parse_error:
                             print(f"⚠️  [CACHE] Error parseando timestamp del cache: {cache_parse_error}")
@@ -1118,10 +1110,20 @@ class PurchaseService:
                         await db.commit()
                     
                     # Refrescar la orden para obtener los valores actualizados
-                    await db.refresh(order)
-                    print(f"✅ [get_order_status] Orden actualizada exitosamente")
+                    await db.refresh(order, ["order_service_items"])
+                    # Cargar servicios si no están cargados
+                    if order.order_service_items:
+                        for service_item in order.order_service_items:
+                            if not service_item.service:
+                                await db.refresh(service_item, ["service"])
                 else:
                     print(f"⏳ [get_order_status] Estado sigue siendo '{order.status}'. No se requiere actualización.")
+                    # Asegurar que los servicios estén cargados incluso si no hay actualización
+                    await db.refresh(order, ["order_service_items"])
+                    if order.order_service_items:
+                        for service_item in order.order_service_items:
+                            if not service_item.service:
+                                await db.refresh(service_item, ["service"])
                     
             except Exception as e:
                 # Si falla la verificación con Payku, log el error pero retornar el estado local
@@ -1135,6 +1137,34 @@ class PurchaseService:
         
         # Construir respuesta de forma segura
         try:
+            # Asegurar que los servicios estén cargados antes de construir la respuesta
+            # Esto es importante cuando la orden ya está completada y no entra en el bloque de verificación
+            if not hasattr(order, 'order_service_items') or order.order_service_items is None:
+                await db.refresh(order, ["order_service_items"])
+            
+            # Cargar la relación service si no está cargada
+            if order.order_service_items:
+                for service_item in order.order_service_items:
+                    if not hasattr(service_item, 'service') or service_item.service is None:
+                        await db.refresh(service_item, ["service"])
+            
+            # Obtener servicios de la orden
+            services_list = []
+            if order.order_service_items:
+                logger.debug(f"🔍 [get_order_status] Encontrados {len(order.order_service_items)} servicios para orden {order_id}")
+                for service_item in order.order_service_items:
+                    service_name = service_item.service.name if service_item.service else "Servicio"
+                    logger.debug(f"🔍 [get_order_status] Servicio: {service_name}, quantity: {service_item.quantity}, unit_price: {service_item.unit_price}, final_price: {service_item.final_price}")
+                    services_list.append({
+                        "service_id": str(service_item.service_id),
+                        "service_name": service_name,
+                        "quantity": service_item.quantity,
+                        "unit_price": float(service_item.unit_price),
+                        "total_price": float(service_item.final_price)
+                    })
+            else:
+                logger.debug(f"⚠️ [get_order_status] No se encontraron servicios para orden {order_id}")
+            
             return {
                 "order_id": str(order.id),
                 "status": order.status,
@@ -1144,7 +1174,8 @@ class PurchaseService:
                 "payment_reference": order.payment_reference,
                 "created_at": order.created_at,
                 "paid_at": order.paid_at,
-                "attendees_data": order.attendees_data  # Incluir datos de attendees para obtener tickets
+                "attendees_data": order.attendees_data,  # Incluir datos de attendees para obtener tickets
+                "services": services_list if services_list else None  # Servicios adicionales comprados
             }
         except Exception as e:
             # Si hay error accediendo a order, intentar obtener datos básicos

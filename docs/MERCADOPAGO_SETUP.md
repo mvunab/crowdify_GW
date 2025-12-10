@@ -68,8 +68,8 @@ En la raíz del proyecto backend (`crowdify_GW`), crea o edita el archivo `.env`
 
 ```env
 # Mercado Pago - Credenciales
-MERCADOPAGO_ACCESS_TOKEN=APP_USR-8730015517513045-111209-d3077ef6a256cb4c7599e03efb12bd44-2984124186
-MERCADOPAGO_PUBLIC_KEY=APP_USR-5548d6e2-1b1c-445f-a4f1-d6e551426a24
+MERCADOPAGO_ACCESS_TOKEN=YOUR_ACCESS_TOKEN_HERE
+MERCADOPAGO_PUBLIC_KEY=YOUR_PUBLIC_KEY_HERE
 MERCADOPAGO_WEBHOOK_SECRET=
 MERCADOPAGO_ENVIRONMENT=sandbox
 
@@ -77,8 +77,8 @@ MERCADOPAGO_ENVIRONMENT=sandbox
 APP_BASE_URL=http://localhost:5173
 
 # Información adicional (para referencia)
-# Application ID: 3707112352713547
-# User ID: 2972046318
+# Application ID: YOUR_APPLICATION_ID
+# User ID: YOUR_USER_ID
 ```
 
 ### 3.3 Verificar valores
@@ -90,7 +90,7 @@ APP_BASE_URL=http://localhost:5173
   - `sandbox` para desarrollo/pruebas
   - `production` para producción (solo cuando estés listo)
 
-> **Nota**: Las credenciales proporcionadas empiezan con `APP_USR-`. Si son credenciales de producción, asegúrate de cambiar `MERCADOPAGO_ENVIRONMENT` a `production` cuando estés listo para recibir pagos reales.
+> **Nota**: Reemplaza `YOUR_ACCESS_TOKEN_HERE` y `YOUR_PUBLIC_KEY_HERE` con tus credenciales reales. Si son credenciales de producción, asegúrate de cambiar `MERCADOPAGO_ENVIRONMENT` a `production` cuando estés listo para recibir pagos reales.
 
 ## 🔗 Paso 4: Configurar Webhooks (Opcional para Desarrollo)
 

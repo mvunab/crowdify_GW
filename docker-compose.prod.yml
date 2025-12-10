@@ -1,39 +1,52 @@
+# Variables de entorno comunes (DRY principle)
+x-common-minio: &common-minio
+  MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+  MINIO_SECURE: ${MINIO_SECURE:-false}
+  MINIO_BUCKET_TICKETS: ${MINIO_BUCKET_TICKETS:-tickets-pdf}
+
+x-common-database: &common-database
+  DATABASE_URL: ${DATABASE_URL}
+
+x-common-redis: &common-redis
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+
+x-common-app: &common-app
+  APP_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  PYTHONUNBUFFERED: "1"
+  PYTHONPATH: "/app"
+  POETRY_VIRTUALENVS_CREATE: "false"
+
+x-common-smtp: &common-smtp
+  SMTP_HOST: ${SMTP_HOST}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER}
+  SMTP_PASSWORD: ${SMTP_PASSWORD}
+  SMTP_FROM: ${SMTP_FROM}
+
 services:
   backend:
     build: .
     image: crowdify-api:prod
     restart: unless-stopped
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_SECURE: ${MINIO_SECURE:-false}
-      MINIO_BUCKET_TICKETS: ${MINIO_BUCKET_TICKETS:-tickets-pdf}
+      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp]
       JWT_SECRET: ${JWT_SECRET}
       QR_SECRET: ${QR_SECRET}
-      SMTP_HOST: ${SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_USER: ${SMTP_USER}
-      SMTP_PASSWORD: ${SMTP_PASSWORD}
-      SMTP_FROM: ${SMTP_FROM}
       SUPABASE_URL: ${SUPABASE_URL}
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
       CORS_ORIGINS: ${CORS_ORIGINS}
-      APP_ENV: production
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      PYTHONUNBUFFERED: "1"
-      PYTHONPATH: "/app"
-      POETRY_VIRTUALENVS_CREATE: "false"
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     networks:
       - crowdify-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -43,29 +56,15 @@ services:
     build: .
     image: crowdify-api:prod
     restart: unless-stopped
-    command: ["poetry", "run", "celery", "-A", "app.worker:celery_app", "worker", "-l", "INFO", "--concurrency", "4"]
+    command: ["poetry", "run", "celery", "-A", "shared.cache.celery_app:celery_app", "worker", "-l", "INFO", "--concurrency", "4"]
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_SECURE: ${MINIO_SECURE:-false}
-      MINIO_BUCKET_TICKETS: ${MINIO_BUCKET_TICKETS:-tickets-pdf}
+      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp]
       QR_SECRET: ${QR_SECRET}
-      SMTP_HOST: ${SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_USER: ${SMTP_USER}
-      SMTP_PASSWORD: ${SMTP_PASSWORD}
-      SMTP_FROM: ${SMTP_FROM}
-      APP_ENV: production
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      PYTHONUNBUFFERED: "1"
-      PYTHONPATH: "/app"
-      POETRY_VIRTUALENVS_CREATE: "false"
     depends_on:
-      - backend
-      - redis
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
     networks:
       - crowdify-network
 
@@ -74,21 +73,20 @@ services:
     image: crowdify-pdfsvc:prod
     restart: unless-stopped
     environment:
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_SECURE: ${MINIO_SECURE:-false}
+      <<: [*common-minio]
     ports:
       - "${PDFSVC_PORT:-9002}:9002"
     depends_on:
-      - minio
+      minio:
+        condition: service_healthy
     networks:
       - crowdify-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9002/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9002/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
 
   redis:
     image: redis:7-alpine
@@ -105,6 +103,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 5s
 
   minio:
     image: minio/minio:latest
@@ -125,6 +124,7 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+      start_period: 30s
 
 volumes:
   redis-data:
@@ -133,4 +133,3 @@ volumes:
 networks:
   crowdify-network:
     driver: bridge
-

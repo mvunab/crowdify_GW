@@ -1,41 +1,33 @@
-# Documentación de la API
+# Documentación - Crowdify GW
 
-Esta carpeta contiene la documentación completa de la API de Crowdify.
+Este directorio contiene la documentación técnica y de configuración del proyecto.
 
-## Archivos Disponibles
+## Índice de Documentación
 
-- **`API_DOCUMENTATION.md`** - Documentación completa en Markdown con ejemplos
-- **`openapi.json`** - Schema OpenAPI 3.1 (generado automáticamente)
+### Configuración y Setup
 
-## Para el Agente de IA
+- **`API_DOCUMENTATION.md`** - Documentación completa de los endpoints de la API
+- **`BACKEND_README.md`** - Guía detallada del backend, arquitectura y estructura
+- **`MERCADOPAGO_SETUP.md`** - Configuración paso a paso de Mercado Pago
+- **`PAYKU_FLUJO_COMPLETO.md`** - Flujo completo de integración con Payku
+- **`RESEND_SETUP.md`** - Configuración de Resend para envío de emails
+- **`WEBHOOK_CONFIGURATION.md`** - Configuración de webhooks para pagos
 
-El agente de IA puede usar estos archivos para entender cómo funciona la API:
+### Integraciones
 
-1. **`API_DOCUMENTATION.md`** - Documentación legible con ejemplos de uso
-2. **`openapi.json`** - Schema técnico con todos los endpoints, parámetros y respuestas
+- **`EMAIL_INTEGRATION.md`** - Integración de emails con Resend
+- **`EMAIL_SERVICES_COMPARISON.md`** - Comparación de servicios de email
 
-## Generar/Actualizar el Schema OpenAPI
+### Funcionalidades
 
-Si necesitas actualizar el schema OpenAPI:
+- **`HU_PRODUCTOS_NINOS.md`** - Historia de usuario: Productos para niños
+- **`HU_PRODUCTOS_NINOS_RESUMEN.md`** - Resumen de productos para niños
 
-```bash
-# Asegúrate de que la API esté corriendo
-docker compose up -d backend
+### Changelog
 
-# Genera el schema
-python scripts/save-openapi-schema.py
-```
+- **`CHANGELOG.md`** - Registro de cambios del proyecto
 
-O manualmente:
+## Notas
 
-```bash
-curl http://localhost:8000/openapi.json > docs/openapi.json
-```
-
-## Documentación Interactiva
-
-También puedes explorar la API de forma interactiva:
-
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-
+- La documentación de troubleshooting y debugging ha sido removida para mantener el repositorio limpio
+- Para documentación de desarrollo interno, consultar el wiki del proyecto o repositorio privado

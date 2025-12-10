@@ -13,7 +13,9 @@ from dotenv import load_dotenv
 # Cargar variables de entorno
 load_dotenv()
 
-SUPABASE_URL = os.getenv('SUPABASE_URL', 'https://olyicxwxyxwtiandtbcg.supabase.co')
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+if not SUPABASE_URL:
+    raise ValueError('SUPABASE_URL debe estar configurado en las variables de entorno')
 SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY', '')
 
 

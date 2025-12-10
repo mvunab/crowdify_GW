@@ -41,6 +41,15 @@ class PurchaseResponse(BaseModel):
     payment_method: Optional[str] = None  # 'mercadopago' | 'bank_transfer'
 
 
+class ServiceItemResponse(BaseModel):
+    """Información de un servicio comprado"""
+    service_id: str
+    service_name: str
+    quantity: int
+    unit_price: float
+    total_price: float
+
+
 class OrderStatusResponse(BaseModel):
     order_id: str
     status: str
@@ -51,4 +60,5 @@ class OrderStatusResponse(BaseModel):
     created_at: datetime
     paid_at: Optional[datetime] = None
     attendees_data: Optional[List[Dict]] = None  # Datos de attendees para obtener tickets
+    services: Optional[List[ServiceItemResponse]] = None  # Servicios adicionales comprados
 

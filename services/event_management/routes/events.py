@@ -302,6 +302,9 @@ async def create_event(
             user_id=current_user.get("user_id")
         )
 
+        # Cargar relaciones para la respuesta
+        await db.refresh(event, ["organizer", "ticket_types", "event_services"])
+
         return EventResponse(
             id=str(event.id),
             organizer_id=str(event.organizer_id),
@@ -312,12 +315,52 @@ async def create_event(
             capacity_total=event.capacity_total,
             capacity_available=event.capacity_available,
             allow_children=event.allow_children,
-            created_at=event.created_at
+            category=getattr(event, 'category', 'otro'),
+            description=getattr(event, 'description', None),
+            image_url=getattr(event, 'image_url', None),
+            ticket_types=[
+                TicketTypeResponse(
+                    id=str(tt.id),
+                    event_id=str(tt.event_id),
+                    name=tt.name,
+                    price=float(tt.price),
+                    is_child=tt.is_child,
+                    created_at=tt.created_at
+                )
+                for tt in (event.ticket_types if hasattr(event, 'ticket_types') else [])
+            ],
+            event_services=[
+                EventServiceResponse(
+                    id=str(es.id),
+                    event_id=str(es.event_id),
+                    name=es.name,
+                    description=es.description,
+                    price=float(es.price),
+                    service_type=getattr(es, 'service_type', 'general'),
+                    stock_total=getattr(es, 'stock', 0),
+                    stock_available=getattr(es, 'stock_available', 0),
+                    min_age=es.min_age,
+                    max_age=es.max_age,
+                    created_at=es.created_at
+                )
+                for es in (event.event_services if hasattr(event, 'event_services') else [])
+            ],
+            created_at=event.created_at,
+            updated_at=getattr(event, 'updated_at', None)
         )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
+        )
+    except Exception as e:
+        # Log del error para debugging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error creando evento: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno al crear evento: {str(e)}"
         )
 
 

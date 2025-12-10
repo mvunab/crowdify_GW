@@ -74,20 +74,31 @@ async def get_organizer_info(
 ):
     """
     Obtener información del organizador asociado al usuario actual
+    
+    Si el usuario no tiene un organizador asociado, se crea automáticamente
+    uno con valores por defecto basados en la información del usuario.
 
     Requiere autenticación de admin
     """
     service = OrganizerService()
 
+    # Intentar obtener el organizador existente
     organizer = await service.get_organizer_by_user_id(
         db=db,
         user_id=current_user.get("user_id")
     )
 
+    # Si no existe, crear uno automáticamente
+    if not organizer:
+        organizer = await service.create_organizer_for_user(
+            db=db,
+            user_id=current_user.get("user_id")
+        )
+
     if not organizer:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No se encontró organizador asociado a este usuario"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al obtener o crear organizador"
         )
 
     return OrganizerResponse(
@@ -289,17 +300,24 @@ async def get_dashboard_stats(
 
     Requiere autenticación de admin
     """
-    # Obtener organizer_id del usuario
+    # Obtener organizer_id del usuario (crear automáticamente si no existe)
     organizer_service = OrganizerService()
     organizer = await organizer_service.get_organizer_by_user_id(
         db=db,
         user_id=current_user.get("user_id")
     )
 
+    # Si no existe, crear uno automáticamente
+    if not organizer:
+        organizer = await organizer_service.create_organizer_for_user(
+            db=db,
+            user_id=current_user.get("user_id")
+        )
+
     if not organizer:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No se encontró organizador asociado a este usuario"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al obtener o crear organizador"
         )
 
     # Calcular estadísticas
@@ -320,22 +338,47 @@ async def get_dashboard_stats(
 async def get_admin_events(
     event_status: str = Query("all", description="Filtro de estado: upcoming, ongoing, past, all"),
     sort: str = Query("starts_at_desc", description="Ordenamiento: starts_at_asc, starts_at_desc, revenue_desc"),
+    my_events: bool = Query(False, description="Si es True, solo devuelve eventos del organizador del usuario actual"),
     db: AsyncSession = Depends(get_db),
     current_user: Dict = Depends(get_current_admin_or_coordinator)
 ):
     """
     Listar eventos con estadísticas
 
-    Admin y Coordinator ven TODOS los eventos (sin filtro de organizador)
+    - Si `my_events=true`: Solo devuelve eventos del organizador del usuario actual
+    - Si `my_events=false` (default): Devuelve todos los eventos (solo para coordinators o super admins)
+    
     Requiere autenticación de admin o coordinator
     """
     role = current_user.get("role")
+    
+    # Determinar organizer_id según el parámetro my_events
+    organizer_id = None
+    if my_events:
+        # Obtener el organizador del usuario actual
+        organizer_service = OrganizerService()
+        organizer = await organizer_service.get_organizer_by_user_id(
+            db=db,
+            user_id=current_user.get("user_id")
+        )
+        
+        # Si no existe, crear uno automáticamente
+        if not organizer:
+            organizer = await organizer_service.create_organizer_for_user(
+                db=db,
+                user_id=current_user.get("user_id")
+            )
+        
+        if organizer:
+            organizer_id = str(organizer.id)
+        else:
+            # Si no se puede obtener/crear organizador, devolver lista vacía
+            return AdminEventsListResponse(events=[])
 
-    # Admin y coordinator ven TODOS los eventos (sin filtro de organizer_id)
     events_service = AdminEventsService()
     events_with_stats = await events_service.get_events_with_stats(
         db=db,
-        organizer_id=None,  # None = sin filtro, devolver todos los eventos
+        organizer_id=organizer_id,  # None = todos los eventos, str = filtrar por organizador
         status=event_status,
         sort=sort
     )

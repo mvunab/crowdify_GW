@@ -4,7 +4,7 @@ import os
 
 # Configuración
 env_content = """# Database - PostgreSQL de Supabase
-DATABASE_URL=postgresql://postgres.olyicxwxyxwtiandtbcg:-->Kdc154515@aws-1-us-east-2.pooler.supabase.com:5432/postgres
+DATABASE_URL=postgresql://user:password@host:5432/database
 DATABASE_POOL_SIZE=20
 DATABASE_MAX_OVERFLOW=10
 
@@ -13,12 +13,12 @@ REDIS_URL=redis://redis:6379/0
 REDIS_PASSWORD=
 
 # Supabase (para migración y compatibilidad)
-SUPABASE_URL=https://olyicxwxyxwtiandtbcg.supabase.co
-SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9seWljeHd4eXh3dGlhbmR0YmNnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE2NzAxMDMsImV4cCI6MjA3NzI0NjEwM30.TeteoABAf6Kf_ZGzo7PwwDXhqxXpAgFj2MPROl3aR94
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_ANON_KEY=your-supabase-anon-key-here
 SUPABASE_SERVICE_KEY=
 
-# JWT - Clave generada automáticamente
-JWT_SECRET_KEY=YOaSmGyb_jobA7QJipCIHdUXPOSoaJZClmwrIMOrFE4
+# JWT - Clave secreta (generar una nueva para producción)
+JWT_SECRET_KEY=your-super-secret-jwt-key-change-this-in-production
 JWT_ALGORITHM=HS256
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
 JWT_REFRESH_TOKEN_EXPIRE_DAYS=7

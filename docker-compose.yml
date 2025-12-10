@@ -1,3 +1,17 @@
+# Variables de entorno comunes (DRY principle)
+x-common-minio: &common-minio
+  MINIO_ENDPOINT: http://minio:9000
+  MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
+  MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio12345}
+  MINIO_SECURE: "false"
+  MINIO_BUCKET_TICKETS: tickets-pdf
+
+x-common-database: &common-database
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-tickets}:${POSTGRES_PASSWORD:-tickets}@db:5432/${POSTGRES_DB:-tickets}}
+
+x-common-redis: &common-redis
+  REDIS_URL: redis://redis:6379/0
+
 services:
   db:
     image: postgres:16-alpine
@@ -14,11 +28,18 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   minio:
     image: minio/minio:latest
@@ -31,93 +52,72 @@ services:
       - "9003:9003"
     volumes:
       - miniodata:/data
-
-  # MailHog comentado - ahora usamos Resend
-  # mailhog:
-  #   image: mailhog/mailhog
-  #   ports:
-  #     - "1025:1025"  # SMTP port
-  #     - "8025:8025"  # Web UI port
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
 
   backend:
     build: .
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-tickets}:${POSTGRES_PASSWORD:-tickets}@db:5432/${POSTGRES_DB:-tickets}}
-      REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio12345}
-      MINIO_SECURE: "false"
-      MINIO_BUCKET_TICKETS: tickets-pdf
+      <<: [*common-database, *common-redis, *common-minio]
       JWT_SECRET: ${JWT_SECRET:-dev-secret}
       QR_SECRET: ${QR_SECRET:-dev-qr}
       # Resend Configuration
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-onboarding@resend.dev}
-      # SMTP Legacy (mantenido para compatibilidad)
-      SMTP_HOST: mailhog
-      SMTP_PORT: "1025"
-      SMTP_FROM: tickets@example.local
       PYTHONUNBUFFERED: "1"
-      SUPABASE_URL: ${SUPABASE_URL}
-      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
       # Mercado Pago Configuration
-      MERCADOPAGO_ACCESS_TOKEN: ${MERCADOPAGO_ACCESS_TOKEN}
-      MERCADOPAGO_PUBLIC_KEY: ${MERCADOPAGO_PUBLIC_KEY}
+      MERCADOPAGO_ACCESS_TOKEN: ${MERCADOPAGO_ACCESS_TOKEN:-}
+      MERCADOPAGO_PUBLIC_KEY: ${MERCADOPAGO_PUBLIC_KEY:-}
       MERCADOPAGO_WEBHOOK_SECRET: ${MERCADOPAGO_WEBHOOK_SECRET:-}
       MERCADOPAGO_ENVIRONMENT: ${MERCADOPAGO_ENVIRONMENT:-sandbox}
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
       NGROK_URL: ${NGROK_URL:-}
       POETRY_VIRTUALENVS_CREATE: "false"
     depends_on:
-      - db
-      - redis
-      - minio
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     ports:
       - "8000:8000"
     volumes:
       - .:/app
-      # Excluir cache de Poetry del volumen
+      # Excluir cache y venv de Poetry del volumen
       - /app/.venv
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-      - 1.1.1.1
-    command: ["poetry", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+      - /app/.poetry
+    command: ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
   worker:
     build: .
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-tickets}:${POSTGRES_PASSWORD:-tickets}@db:5432/${POSTGRES_DB:-tickets}}
-      REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio12345}
-      MINIO_SECURE: "false"
-      MINIO_BUCKET_TICKETS: tickets-pdf
+      <<: [*common-database, *common-redis, *common-minio]
       # Resend Configuration
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-onboarding@resend.dev}
-      # SMTP Legacy (mantenido para compatibilidad)
-      SMTP_HOST: mailhog
-      SMTP_PORT: "1025"
-      SMTP_FROM: tickets@example.local
       QR_SECRET: ${QR_SECRET:-dev-qr}
       POETRY_VIRTUALENVS_CREATE: "false"
     depends_on:
-      - backend
-      - redis
-    command: ["poetry", "run", "celery", "-A", "shared.cache.celery_app:celery_app", "worker", "-l", "INFO"]
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "celery", "-A", "shared.cache.celery_app:celery_app", "worker", "-l", "INFO"]
 
   pdfsvc:
     build: ./pdfsvc
     environment:
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio12345}
-      MINIO_SECURE: "false"
+      <<: [*common-minio]
     depends_on:
-      - minio
+      minio:
+        condition: service_healthy
     ports:
       - "9002:9002"
 

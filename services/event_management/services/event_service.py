@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, and_, text
 from sqlalchemy.orm import selectinload
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 from shared.database.models import Event, Organizer, TicketType
 from shared.cache.redis_client import cache_get, cache_set, cache_delete, get_redis
@@ -139,10 +139,19 @@ class EventService:
         Requiere: admin role
         Compatible con: adminService.createEvent()
         """
+        # Convertir strings a UUIDs
+        try:
+            organizer_id_uuid = UUID(event_data["organizer_id"]) if isinstance(event_data["organizer_id"], str) else event_data["organizer_id"]
+            user_id_uuid = UUID(user_id) if isinstance(user_id, str) else user_id
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"ID inválido: {str(e)}")
+
         # Verificar que el organizer existe y pertenece al usuario
         stmt = select(Organizer).where(
-            Organizer.id == event_data["organizer_id"],
-            Organizer.user_id == user_id
+            and_(
+                Organizer.id == organizer_id_uuid,
+                Organizer.user_id == user_id_uuid
+            )
         )
         result = await db.execute(stmt)
         organizer = result.scalar_one_or_none()
@@ -150,15 +159,66 @@ class EventService:
         if not organizer:
             raise ValueError("Organizer no encontrado o no pertenece al usuario")
 
+        # Validar location_text (requerido)
+        location_text = event_data.get("location_text")
+        if not location_text:
+            raise ValueError("location_text es requerido")
+
+        # Convertir fechas - pueden venir como strings o datetime objects
+        # IMPORTANTE: La columna en BD es TIMESTAMP WITHOUT TIME ZONE, así que debemos
+        # asegurarnos de que los datetimes sean "naive" (sin timezone)
+        starts_at = event_data["starts_at"]
+        
+        # Si es string, parsearlo
+        if isinstance(starts_at, str):
+            try:
+                starts_at = datetime.fromisoformat(starts_at.replace('Z', '+00:00'))
+            except ValueError:
+                raise ValueError(f"Formato de fecha inválido para starts_at: {starts_at}")
+        
+        # Si es datetime con timezone, convertirlo a naive (sin timezone)
+        if isinstance(starts_at, datetime):
+            if starts_at.tzinfo is not None:
+                # Convertir a UTC primero, luego remover timezone
+                starts_at = starts_at.astimezone(timezone.utc).replace(tzinfo=None)
+            # Si ya es naive, dejarlo como está
+        else:
+            raise ValueError(f"starts_at debe ser datetime o string, recibido: {type(starts_at)}")
+
+        ends_at = event_data.get("ends_at")
+        if ends_at:
+            # Si es string, parsearlo
+            if isinstance(ends_at, str):
+                try:
+                    ends_at = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
+                except ValueError:
+                    raise ValueError(f"Formato de fecha inválido para ends_at: {ends_at}")
+            
+            # Si es datetime con timezone, convertirlo a naive (sin timezone)
+            if isinstance(ends_at, datetime):
+                if ends_at.tzinfo is not None:
+                    # Convertir a UTC primero, luego remover timezone
+                    ends_at = ends_at.astimezone(timezone.utc).replace(tzinfo=None)
+                # Si ya es naive, dejarlo como está
+            else:
+                raise ValueError(f"ends_at debe ser datetime o string, recibido: {type(ends_at)}")
+        else:
+            # Si no se proporciona ends_at, calcularlo basado en starts_at (4 horas por defecto)
+            if starts_at:
+                from datetime import timedelta
+                ends_at = starts_at + timedelta(hours=4)
+            else:
+                raise ValueError("ends_at es requerido si starts_at no es válido")
+
         # Crear evento
         event = Event(
             id=UUID(event_data.get("id")) if event_data.get("id") else None,
-            organizer_id=event_data["organizer_id"],
-            created_by_user_id=UUID(user_id) if user_id else None,  # Admin que crea el evento
+            organizer_id=organizer_id_uuid,
+            created_by_user_id=user_id_uuid,  # Admin que crea el evento
             name=event_data["name"],
-            location_text=event_data.get("location_text"),
-            starts_at=event_data["starts_at"],
-            ends_at=event_data.get("ends_at"),
+            location_text=location_text,
+            starts_at=starts_at,
+            ends_at=ends_at,
             capacity_total=event_data["capacity_total"],
             capacity_available=event_data["capacity_total"],
             allow_children=event_data.get("allow_children", False),
@@ -220,10 +280,10 @@ class EventService:
             keys = await redis_conn.keys("events:list:*")
             if keys:
                 await redis_conn.delete(*keys)
-                print(f"[Cache] Invalidadas {len(keys)} claves de cache de eventos")
+                # Cache invalidado (no loguear en producción)
         except Exception as e:
-            print(f"[Cache] Error invalidando cache de eventos: {e}")
-            # Si falla, continuar sin cache
+            # Si falla, continuar sin cache (no loguear en producción)
+            pass
 
     @staticmethod
     async def update_event(
