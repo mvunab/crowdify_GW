@@ -497,3 +497,183 @@ class EmailService:
             html_content=html_content,
             text_content=text_content
         )
+
+    async def send_order_tickets_email(
+        self,
+        to_email: str,
+        buyer_name: str,
+        event_name: str,
+        event_date: str,
+        event_location: str,
+        order_id: str,
+        tickets_count: int,
+        pdf_attachment: bytes,
+        attendees_names: Optional[List[str]] = None
+    ) -> bool:
+        """
+        Enviar UN solo email con PDF adjunto conteniendo TODOS los tickets de la orden.
+
+        Este es el método preferido - más profesional que enviar múltiples emails.
+        El PDF ya contiene los QR codes de cada ticket.
+
+        Args:
+            to_email: Email del comprador/titular principal
+            buyer_name: Nombre del comprador
+            event_name: Nombre del evento
+            event_date: Fecha del evento (formateada)
+            event_location: Ubicación del evento
+            order_id: ID de la orden
+            tickets_count: Cantidad de tickets en la orden
+            pdf_attachment: Bytes del PDF con todos los tickets
+            attendees_names: Lista opcional de nombres de los asistentes
+
+        Returns:
+            True si se envió correctamente
+        """
+        # Crear lista de asistentes para el email
+        attendees_html = ""
+        if attendees_names and len(attendees_names) > 0:
+            attendees_list = "".join([f"<li>{name}</li>" for name in attendees_names])
+            attendees_html = f"""
+                <div style="margin: 15px 0;">
+                    <p style="font-weight: 600; color: #374151; margin-bottom: 8px;">Asistentes:</p>
+                    <ul style="margin: 0; padding-left: 20px; color: #4b5563;">
+                        {attendees_list}
+                    </ul>
+                </div>
+            """
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: 0 auto; padding: 0; background-color: #f3f4f6;">
+
+            <!-- Header -->
+            <div style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white; padding: 40px 30px; text-align: center;">
+                <h1 style="margin: 0 0 10px 0; font-size: 28px; font-weight: 700;">🎫 ¡Tus Entradas están Listas!</h1>
+                <p style="margin: 0; opacity: 0.9; font-size: 16px;">{tickets_count} entrada{"s" if tickets_count > 1 else ""} para {event_name}</p>
+            </div>
+
+            <!-- Content -->
+            <div style="background-color: white; padding: 30px; border-radius: 0 0 8px 8px;">
+                <p style="font-size: 16px; margin-bottom: 20px;">Hola <strong>{buyer_name}</strong>,</p>
+
+                <p style="font-size: 15px; color: #4b5563; margin-bottom: 25px;">
+                    Tu compra ha sido confirmada exitosamente. Adjunto encontrarás un PDF con
+                    {"todas tus entradas" if tickets_count > 1 else "tu entrada"}, cada una con su código QR único.
+                </p>
+
+                <!-- Event Card -->
+                <div style="background-color: #f8fafc; border-radius: 12px; padding: 25px; margin: 25px 0; border-left: 4px solid #2563eb;">
+                    <h2 style="margin: 0 0 15px 0; color: #1e40af; font-size: 20px;">{event_name}</h2>
+
+                    <div style="display: grid; gap: 12px;">
+                        <div style="display: flex; align-items: center;">
+                            <span style="font-size: 18px; margin-right: 10px;">📅</span>
+                            <span style="color: #374151;"><strong>Fecha:</strong> {event_date}</span>
+                        </div>
+                        <div style="display: flex; align-items: center;">
+                            <span style="font-size: 18px; margin-right: 10px;">📍</span>
+                            <span style="color: #374151;"><strong>Lugar:</strong> {event_location}</span>
+                        </div>
+                        <div style="display: flex; align-items: center;">
+                            <span style="font-size: 18px; margin-right: 10px;">🎟️</span>
+                            <span style="color: #374151;"><strong>Entradas:</strong> {tickets_count}</span>
+                        </div>
+                    </div>
+
+                    {attendees_html}
+                </div>
+
+                <!-- PDF Instructions -->
+                <div style="background-color: #fef3c7; border-radius: 8px; padding: 20px; margin: 25px 0;">
+                    <p style="margin: 0; color: #92400e; font-weight: 600;">
+                        📎 <strong>Tu PDF está adjunto a este correo</strong>
+                    </p>
+                    <p style="margin: 10px 0 0 0; color: #a16207; font-size: 14px;">
+                        Puedes descargarlo, imprimirlo o mostrarlo desde tu teléfono en la entrada del evento.
+                        {"Cada página del PDF corresponde a un asistente diferente." if tickets_count > 1 else ""}
+                    </p>
+                </div>
+
+                <!-- Important -->
+                <div style="border-top: 1px solid #e5e7eb; padding-top: 20px; margin-top: 25px;">
+                    <p style="color: #6b7280; font-size: 14px; margin: 0;">
+                        <strong>Importante:</strong> Cada entrada tiene un código QR único que será validado al ingresar.
+                        Por favor no compartas este PDF con personas que no asistirán al evento.
+                    </p>
+                </div>
+
+                <!-- Order Reference -->
+                <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
+                    <p style="color: #9ca3af; font-size: 12px; margin: 0;">
+                        Orden: {order_id[-12:]}
+                    </p>
+                </div>
+            </div>
+
+            <!-- Footer -->
+            <div style="text-align: center; padding: 25px; color: #6b7280; font-size: 13px;">
+                <p style="margin: 0 0 10px 0;">¡Gracias por tu compra! Te esperamos en el evento 🎉</p>
+                <p style="margin: 0; font-size: 11px;">
+                    Este es un correo automático de Crowdify. Por favor no respondas a este mensaje.
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+
+        # Versión texto plano
+        attendees_text = ""
+        if attendees_names:
+            attendees_text = "\nAsistentes:\n" + "\n".join([f"  - {name}" for name in attendees_names])
+
+        text_content = f"""
+¡Tus Entradas están Listas!
+{tickets_count} entrada{"s" if tickets_count > 1 else ""} para {event_name}
+
+Hola {buyer_name},
+
+Tu compra ha sido confirmada exitosamente. Adjunto encontrarás un PDF con
+{"todas tus entradas" if tickets_count > 1 else "tu entrada"}, cada una con su código QR único.
+
+DETALLES DEL EVENTO
+-------------------
+Evento: {event_name}
+Fecha: {event_date}
+Lugar: {event_location}
+Entradas: {tickets_count}
+{attendees_text}
+
+INSTRUCCIONES
+-------------
+- El PDF está adjunto a este correo
+- Puedes descargarlo, imprimirlo o mostrarlo desde tu teléfono
+- Cada entrada tiene un código QR único que será validado al ingresar
+
+Orden: {order_id[-12:]}
+
+¡Gracias por tu compra! Te esperamos en el evento.
+
+---
+Este es un correo automático de Crowdify.
+        """
+
+        # Preparar el adjunto PDF
+        attachments = [{
+            "filename": f"entradas-{order_id[-8:]}.pdf",
+            "content": pdf_attachment,
+            "content_type": "application/pdf"
+        }]
+
+        return await self.send_email(
+            to_email=to_email,
+            subject=f"🎫 Tus entradas para {event_name}",
+            html_content=html_content,
+            text_content=text_content,
+            attachments=attachments
+        )

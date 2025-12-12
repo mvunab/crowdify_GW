@@ -5,6 +5,7 @@ from typing import List, Dict, Optional
 from datetime import datetime, date
 import uuid
 import hashlib
+import os
 from shared.database.models import (
     Order, OrderItem, Ticket, Event, TicketType, EventService,
     TicketChildDetail, TicketChildMedication, OrderCommission, OrderServiceItem
@@ -1374,27 +1375,19 @@ class PurchaseService:
         tickets: List[Ticket]
     ):
         """
-        Enviar emails con tickets a los asistentes
+        Enviar UN SOLO email con PDF adjunto conteniendo TODOS los tickets de la orden.
 
-        Agrupa tickets por email y envía un email por cada destinatario
+        El PDF se genera llamando al microservicio pdfsvc y contiene una página por ticket,
+        cada una con su QR code único.
         """
-        from collections import defaultdict
+        import httpx
         from datetime import datetime
 
-        # Agrupar tickets por email
-        tickets_by_email = defaultdict(list)
-        for ticket in tickets:
-            if ticket.holder_email:
-                tickets_by_email[ticket.holder_email.lower().strip()].append(ticket)
-
-        if not tickets_by_email:
-            logger.warning(f"No hay emails para enviar tickets de orden {order.id}")
-            return
-
-        # Obtener información del evento (asumimos que todos los tickets son del mismo evento)
         if not tickets:
+            logger.warning(f"No hay tickets para enviar en orden {order.id}")
             return
 
+        # Obtener información del evento
         first_ticket = tickets[0]
         stmt_event = select(Event).where(Event.id == first_ticket.event_id)
         result_event = await db.execute(stmt_event)
@@ -1416,51 +1409,104 @@ class PurchaseService:
                     event_datetime = event.starts_at
 
                 # Formatear fecha en español
-                event_date_str = event_datetime.strftime("%d de %B, %Y")
-                # Reemplazar nombres de meses en inglés por español
-                months_es = {
-                    "January": "Enero", "February": "Febrero", "March": "Marzo",
-                    "April": "Abril", "May": "Mayo", "June": "Junio",
-                    "July": "Julio", "August": "Agosto", "September": "Septiembre",
-                    "October": "Octubre", "November": "Noviembre", "December": "Diciembre"
-                }
-                for en, es in months_es.items():
-                    event_date_str = event_date_str.replace(en, es)
+                meses = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+                        'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre']
+                dias = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+                event_date_str = f"{dias[event_datetime.weekday()]}, {event_datetime.day} de {meses[event_datetime.month - 1]} de {event_datetime.year}"
+
+                # Agregar hora si está disponible
+                if event_datetime.hour > 0 or event_datetime.minute > 0:
+                    event_date_str += f" a las {event_datetime.strftime('%H:%M')} hrs"
             except Exception as e:
                 logger.warning(f"Error formateando fecha del evento: {e}")
 
-        # Inicializar servicio de email
+        # Preparar datos de tickets para el PDF
+        tickets_data = []
+        attendees_names = []
+        for ticket in tickets:
+            holder_name = f"{ticket.holder_first_name} {ticket.holder_last_name}".strip()
+            if holder_name:
+                attendees_names.append(holder_name)
+
+            tickets_data.append({
+                "ticket_id": str(ticket.id),
+                "qr_signature": ticket.qr_signature,
+                "holder_first_name": ticket.holder_first_name or "",
+                "holder_last_name": ticket.holder_last_name or "",
+                "holder_email": ticket.holder_email,
+                "event": {
+                    "name": event.name,
+                    "starts_at": event.starts_at.isoformat() if event.starts_at else None,
+                    "location_text": event.location_text,
+                },
+                "issued_at": ticket.issued_at.isoformat() if ticket.issued_at else None
+            })
+
+        # Generar PDF con todos los tickets usando pdfsvc
+        pdf_bytes = None
+        pdfsvc_url = os.getenv("PDFSVC_URL", "http://pdfsvc:9002")
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{pdfsvc_url}/tickets/pdf/bulk",
+                    json={
+                        "tickets": tickets_data,
+                        "order_id": str(order.id),
+                        "buyer_name": attendees_names[0] if attendees_names else None,
+                    }
+                )
+
+                if response.status_code == 200:
+                    pdf_bytes = response.content
+                    logger.info(f"✅ PDF generado exitosamente para orden {order.id} ({len(tickets)} tickets, {len(pdf_bytes)} bytes)")
+                else:
+                    logger.error(f"❌ Error generando PDF: {response.status_code} - {response.text}")
+        except Exception as e:
+            logger.error(f"❌ Error conectando a pdfsvc: {e}", exc_info=True)
+
+        if not pdf_bytes:
+            logger.error(f"No se pudo generar PDF para orden {order.id}, no se enviará email")
+            return
+
+        # Determinar el email del comprador principal
+        # Prioridad: primer attendee con email, o el holder del primer ticket
+        buyer_email = None
+        buyer_name = "Estimado/a"
+
+        for ticket in tickets:
+            if ticket.holder_email:
+                buyer_email = ticket.holder_email.lower().strip()
+                buyer_name = f"{ticket.holder_first_name} {ticket.holder_last_name}".strip() or buyer_name
+                break
+
+        if not buyer_email:
+            logger.warning(f"No hay email de comprador para orden {order.id}")
+            return
+
+        # Enviar UN solo email con el PDF adjunto
         email_service = EmailService()
 
-        # Enviar un email por cada destinatario
-        for email, user_tickets in tickets_by_email.items():
-            try:
-                # Obtener nombre del primer ticket (o usar un nombre genérico)
-                first_ticket = user_tickets[0]
-                attendee_name = f"{first_ticket.holder_first_name} {first_ticket.holder_last_name}".strip()
-                if not attendee_name:
-                    attendee_name = "Estimado/a"
+        try:
+            success = await email_service.send_order_tickets_email(
+                to_email=buyer_email,
+                buyer_name=buyer_name,
+                event_name=event.name,
+                event_date=event_date_str,
+                event_location=event_location_str,
+                order_id=str(order.id),
+                tickets_count=len(tickets),
+                pdf_attachment=pdf_bytes,
+                attendees_names=attendees_names if len(attendees_names) > 1 else None
+            )
 
-                # Enviar email con todos los tickets de este usuario
-                # Por ahora enviamos un email por ticket, pero podríamos agruparlos
-                for ticket in user_tickets:
-                    success = await email_service.send_ticket_email(
-                        to_email=email,
-                        attendee_name=attendee_name,
-                        event_name=event.name,
-                        event_date=event_date_str,
-                        event_location=event_location_str,
-                        ticket_id=str(ticket.id)[:8].upper(),  # Mostrar solo primeros 8 caracteres
-                        qr_signature=ticket.qr_signature  # Pasar QR signature para generar imagen
-                    )
+            if success:
+                logger.info(f"✅ Email con {len(tickets)} entrada(s) enviado a {buyer_email} para orden {order.id}")
+            else:
+                logger.error(f"❌ Error enviando email a {buyer_email} para orden {order.id}")
 
-                    if success:
-                        logger.info(f"Email enviado exitosamente a {email} para ticket {ticket.id}")
-                    else:
-                        logger.error(f"Error enviando email a {email} para ticket {ticket.id}")
-
-            except Exception as e:
-                logger.error(f"Error enviando email a {email}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"❌ Error enviando email a {buyer_email}: {e}", exc_info=True)
 
     async def _create_child_details(
         self,

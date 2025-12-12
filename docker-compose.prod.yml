@@ -23,11 +23,19 @@ x-common-app: &common-app
   POETRY_VIRTUALENVS_CREATE: "false"
 
 x-common-smtp: &common-smtp
-  SMTP_HOST: ${SMTP_HOST}
+  # Legacy SMTP (deprecated - usar Resend)
+  SMTP_HOST: ${SMTP_HOST:-}
   SMTP_PORT: ${SMTP_PORT:-587}
-  SMTP_USER: ${SMTP_USER}
-  SMTP_PASSWORD: ${SMTP_PASSWORD}
-  SMTP_FROM: ${SMTP_FROM}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+  # Resend (recomendado)
+  RESEND_API_KEY: ${RESEND_API_KEY}
+  RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-noreply@crowdify.cl}
+
+x-common-services: &common-services
+  # PDF Service para generación de tickets
+  PDFSVC_URL: http://pdfsvc:9002
 
 # ============ CONFIGURACIÓN DE GUNICORN PARA ALTA CONCURRENCIA ============
 x-gunicorn-config: &gunicorn-config
@@ -65,7 +73,7 @@ services:
       --capture-output
       --preload
     environment:
-      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp, *gunicorn-config]
+      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp, *common-services, *gunicorn-config]
       JWT_SECRET: ${JWT_SECRET}
       QR_SECRET: ${QR_SECRET}
       SUPABASE_URL: ${SUPABASE_URL}
@@ -75,6 +83,8 @@ services:
       - "${API_PORT:-8000}:8000"
     depends_on:
       redis:
+        condition: service_healthy
+      pdfsvc:
         condition: service_healthy
     networks:
       - crowdify-network
@@ -109,12 +119,14 @@ services:
       --hostname worker-high@%h
       --max-tasks-per-child 500
     environment:
-      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp]
+      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp, *common-services]
       QR_SECRET: ${QR_SECRET}
     depends_on:
       backend:
         condition: service_started
       redis:
+        condition: service_healthy
+      pdfsvc:
         condition: service_healthy
     networks:
       - crowdify-network
@@ -131,7 +143,7 @@ services:
     build: .
     image: crowdify-api:prod
     restart: unless-stopped
-    # Worker para tareas normales (emails)
+    # Worker para tareas normales (emails con PDF)
     command: >
       celery -A shared.cache.celery_app:celery_app worker
       -l WARNING
@@ -141,12 +153,14 @@ services:
       --hostname worker-default@%h
       --max-tasks-per-child 1000
     environment:
-      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp]
+      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp, *common-services]
       QR_SECRET: ${QR_SECRET}
     depends_on:
       backend:
         condition: service_started
       redis:
+        condition: service_healthy
+      pdfsvc:
         condition: service_healthy
     networks:
       - crowdify-network
@@ -163,7 +177,7 @@ services:
     build: .
     image: crowdify-api:prod
     restart: unless-stopped
-    # Worker para tareas de baja prioridad (QR generation, reports)
+    # Worker para tareas de baja prioridad (reports)
     command: >
       celery -A shared.cache.celery_app:celery_app worker
       -l WARNING
@@ -173,7 +187,7 @@ services:
       --hostname worker-low@%h
       --max-tasks-per-child 2000
     environment:
-      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp]
+      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp, *common-services]
       QR_SECRET: ${QR_SECRET}
     depends_on:
       backend:

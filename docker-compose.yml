@@ -95,6 +95,8 @@ services:
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
       NGROK_URL: ${NGROK_URL:-}
       POETRY_VIRTUALENVS_CREATE: "false"
+      # PDF Service URL
+      PDFSVC_URL: http://pdfsvc:9002
       # DB Pool config para desarrollo (reducido para Supabase remoto)
       DATABASE_POOL_SIZE: "3"
       DATABASE_MAX_OVERFLOW: "5"
@@ -110,6 +112,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      pdfsvc:
+        condition: service_started
     ports:
       - "8000:8000"
     volumes:
@@ -131,6 +135,8 @@ services:
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-onboarding@resend.dev}
       QR_SECRET: ${QR_SECRET:-dev-qr}
       POETRY_VIRTUALENVS_CREATE: "false"
+      # PDF Service URL
+      PDFSVC_URL: http://pdfsvc:9002
       # DB Pool config reducido para worker
       DATABASE_POOL_SIZE: "2"
       DATABASE_MAX_OVERFLOW: "3"
@@ -144,6 +150,8 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
+      pdfsvc:
+        condition: service_started
     volumes:
       - .:/app
       - /app/.venv
