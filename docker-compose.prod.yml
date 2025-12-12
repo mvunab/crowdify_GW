@@ -11,10 +11,13 @@ x-common-database: &common-database
 
 x-common-redis: &common-redis
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  # Configuración para alta concurrencia
+  REDIS_MAX_CONNECTIONS: ${REDIS_MAX_CONNECTIONS:-50}
+  CELERY_REDIS_MAX_CONNECTIONS: ${CELERY_REDIS_MAX_CONNECTIONS:-50}
 
 x-common-app: &common-app
   APP_ENV: production
-  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_LEVEL: ${LOG_LEVEL:-WARNING}  # WARNING en prod para reducir I/O
   PYTHONUNBUFFERED: "1"
   PYTHONPATH: "/app"
   POETRY_VIRTUALENVS_CREATE: "false"
@@ -26,13 +29,43 @@ x-common-smtp: &common-smtp
   SMTP_PASSWORD: ${SMTP_PASSWORD}
   SMTP_FROM: ${SMTP_FROM}
 
+# ============ CONFIGURACIÓN DE GUNICORN PARA ALTA CONCURRENCIA ============
+x-gunicorn-config: &gunicorn-config
+  # Workers = (2 * CPU cores) + 1 - ajustar según recursos del servidor
+  GUNICORN_WORKERS: ${GUNICORN_WORKERS:-4}
+  # Threads por worker para operaciones I/O-bound
+  GUNICORN_THREADS: ${GUNICORN_THREADS:-2}
+  # Timeout para requests largos (webhooks, payments)
+  GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
+  # Keep-alive para conexiones persistentes
+  GUNICORN_KEEP_ALIVE: ${GUNICORN_KEEP_ALIVE:-5}
+  # Max requests antes de reciclar worker (previene memory leaks)
+  GUNICORN_MAX_REQUESTS: ${GUNICORN_MAX_REQUESTS:-1000}
+  GUNICORN_MAX_REQUESTS_JITTER: ${GUNICORN_MAX_REQUESTS_JITTER:-50}
+
 services:
   backend:
     build: .
     image: crowdify-api:prod
     restart: unless-stopped
+    # ============ COMANDO OPTIMIZADO CON GUNICORN + UVICORN WORKERS ============
+    command: >
+      gunicorn main:app
+      --worker-class uvicorn.workers.UvicornWorker
+      --workers ${GUNICORN_WORKERS:-4}
+      --threads ${GUNICORN_THREADS:-2}
+      --bind 0.0.0.0:8000
+      --timeout ${GUNICORN_TIMEOUT:-120}
+      --keep-alive ${GUNICORN_KEEP_ALIVE:-5}
+      --max-requests ${GUNICORN_MAX_REQUESTS:-1000}
+      --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-50}
+      --graceful-timeout 30
+      --access-logfile -
+      --error-logfile -
+      --capture-output
+      --preload
     environment:
-      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp]
+      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp, *gunicorn-config]
       JWT_SECRET: ${JWT_SECRET}
       QR_SECRET: ${QR_SECRET}
       SUPABASE_URL: ${SUPABASE_URL}
@@ -45,6 +78,15 @@ services:
         condition: service_healthy
     networks:
       - crowdify-network
+    # ============ LÍMITES DE RECURSOS ============
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -52,11 +94,20 @@ services:
       retries: 3
       start_period: 40s
 
-  worker:
+  # ============ CELERY WORKERS OPTIMIZADOS ============
+  worker-high:
     build: .
     image: crowdify-api:prod
     restart: unless-stopped
-    command: ["poetry", "run", "celery", "-A", "shared.cache.celery_app:celery_app", "worker", "-l", "INFO", "--concurrency", "4"]
+    # Worker para tareas de alta prioridad (webhooks, pagos)
+    command: >
+      celery -A shared.cache.celery_app:celery_app worker
+      -l WARNING
+      --concurrency 4
+      --pool prefork
+      --queues high_priority
+      --hostname worker-high@%h
+      --max-tasks-per-child 500
     environment:
       <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp]
       QR_SECRET: ${QR_SECRET}
@@ -67,6 +118,100 @@ services:
         condition: service_healthy
     networks:
       - crowdify-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  worker-default:
+    build: .
+    image: crowdify-api:prod
+    restart: unless-stopped
+    # Worker para tareas normales (emails)
+    command: >
+      celery -A shared.cache.celery_app:celery_app worker
+      -l WARNING
+      --concurrency 4
+      --pool prefork
+      --queues default
+      --hostname worker-default@%h
+      --max-tasks-per-child 1000
+    environment:
+      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp]
+      QR_SECRET: ${QR_SECRET}
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      - crowdify-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  worker-low:
+    build: .
+    image: crowdify-api:prod
+    restart: unless-stopped
+    # Worker para tareas de baja prioridad (QR generation, reports)
+    command: >
+      celery -A shared.cache.celery_app:celery_app worker
+      -l WARNING
+      --concurrency 2
+      --pool prefork
+      --queues low_priority
+      --hostname worker-low@%h
+      --max-tasks-per-child 2000
+    environment:
+      <<: [*common-database, *common-redis, *common-minio, *common-app, *common-smtp]
+      QR_SECRET: ${QR_SECRET}
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      - crowdify-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+
+  # ============ CELERY BEAT PARA TAREAS PROGRAMADAS ============
+  celery-beat:
+    build: .
+    image: crowdify-api:prod
+    restart: unless-stopped
+    command: >
+      celery -A shared.cache.celery_app:celery_app beat
+      -l WARNING
+      --scheduler celery.beat:PersistentScheduler
+    environment:
+      <<: [*common-database, *common-redis, *common-app]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - crowdify-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
 
   pdfsvc:
     build: ./pdfsvc
@@ -81,6 +226,14 @@ services:
         condition: service_healthy
     networks:
       - crowdify-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9002/health')"]
       interval: 30s
@@ -97,7 +250,24 @@ services:
       - redis-data:/data
     networks:
       - crowdify-network
-    command: redis-server --appendonly yes
+    # ============ REDIS OPTIMIZADO PARA ALTA CONCURRENCIA ============
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --tcp-keepalive 300
+      --timeout 0
+      --tcp-backlog 511
+      --maxclients 1000
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 300M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -119,6 +289,14 @@ services:
       - minio-data:/data
     networks:
       - crowdify-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 256M
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s

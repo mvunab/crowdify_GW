@@ -1,144 +1,115 @@
-# Copilot Instructions for Crowdify GW
+# Crowdify GW - AI Coding Instructions
 
-## Project Overview
-FastAPI-based ticket sales and validation platform for events. Uses Supabase (production) or local PostgreSQL (development) with Redis caching, Celery workers, and MercadoPago/Payku payment integrations.
+## Architecture Overview
 
-## Architecture
+**Crowdify GW** is a FastAPI ticket sales backend with domain-driven service organization:
 
-### Service Boundaries
 ```
-main.py                    # FastAPI entrypoint, routes all /api/v1/* endpoints
-├── services/              # Domain modules with their own models/routes/services
-│   ├── ticket_purchase/   # Purchase flow, payment providers (MercadoPago, Payku)
-│   ├── ticket_validation/ # QR validation for scanners at events
-│   ├── event_management/  # CRUD for events, ticket types, prices
-│   ├── notifications/     # Email notifications via SMTP/SendGrid
-│   └── admin/             # Admin-only operations
-├── shared/                # Cross-cutting concerns
-│   ├── database/          # SQLAlchemy models, connection, session
-│   ├── auth/              # JWT/Supabase token validation, role-based deps
-│   ├── cache/             # Redis client, distributed locks, Celery app
-│   └── utils/             # QR generation, rate limiting
-└── pdfsvc/                # Separate microservice for PDF generation + MinIO storage
+main.py              → FastAPI app entry, router registration, lifespan events
+services/            → Domain modules (ticket_purchase, ticket_validation, admin, notifications, event_management)
+shared/              → Cross-cutting: auth/, cache/, database/, utils/
+pdfsvc/              → Separate microservice for PDF generation (port 9002)
 ```
 
-### Data Flow Pattern
-1. Routes use `Depends(get_db)` for async SQLAlchemy sessions
-2. Services are instantiated per-request (lazy-loaded payment providers)
-3. Redis caching with `cache_get`/`cache_set` for expensive queries (events list)
-4. Celery tasks for async work (PDF generation, email sending)
+### Service Pattern
+Each service in `services/` follows: `routes/` → `services/` → `models/`
 
-## Key Conventions
+Example: `services/ticket_purchase/services/purchase_service.py` handles purchase logic, called from `services/ticket_purchase/routes/purchase.py`.
 
-### Authentication Dependencies (`shared/auth/dependencies.py`)
+## API Endpoints Reference
+
+### Route Prefixes
+- `/api/v1/events` - Event listing/management
+- `/api/v1/purchases` - Purchase creation, webhooks
+- `/api/v1/tickets` - Ticket queries, validation
+- `/api/v1/admin` - Admin operations (orders, reports)
+- `/api/v1/notifications` - Email notifications
+
+### Key Endpoints
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `POST /api/v1/purchases` | Optional | Create order with attendees, payment_method (payku/bank_transfer/mercadopago) |
+| `POST /api/v1/purchases/webhook` | None | MercadoPago webhook |
+| `POST /api/v1/purchases/payku-webhook` | None | Payku webhook |
+| `POST /api/v1/tickets/validate` | Scanner/Admin | Validate ticket QR |
+| `GET /api/v1/tickets/email/{email}` | None | Public ticket search by email |
+| `PUT /api/v1/admin/orders/{id}/approve` | Admin | Approve bank transfer |
+
+### Purchase Flow
+1. Frontend calls `POST /api/v1/purchases` with `event_id`, `attendees[]`, `payment_method`
+2. Backend returns `order_id` + `payment_link` (Payku) or `preference_id` (MercadoPago)
+3. User pays externally → webhook received → tickets generated → email sent
+
+## Key Patterns
+
+### Database Access
 ```python
-# Use appropriate dependency based on endpoint requirements:
-get_current_user       # Requires valid JWT
-get_optional_user      # Returns None if no auth (anonymous purchases)
-get_current_admin      # Requires role='admin'
-get_current_scanner    # Requires role in ['scanner', 'admin', 'coordinator']
+from shared.database.session import get_db
+from shared.database.models import Order, Ticket, Event
+
+async def my_route(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Order).where(Order.id == order_id))
 ```
 
-### Database Models (`shared/database/models.py`)
-- All models use UUID primary keys with `uuid.uuid4` default
-- Timestamps: `created_at`, `updated_at` with `server_default=func.now()`
-- Main entities: `User`, `Event`, `TicketType`, `Order`, `OrderItem`, `Ticket`
-- Orders can be anonymous (`user_id` is nullable)
-
-### Service Module Structure
-Each service follows this pattern:
-```
-services/<domain>/
-├── models/      # Pydantic schemas for request/response
-├── routes/      # FastAPI router with endpoints
-├── services/    # Business logic classes
-└── tasks/       # Celery tasks (optional)
-```
-
-### Configuration (`app/core/config.py`)
-Settings loaded via `pydantic-settings` from `.env`. Key settings:
-- `DATABASE_URL`: PostgreSQL connection (auto-converted to asyncpg)
-- `MERCADOPAGO_ACCESS_TOKEN`: Payment provider (prefix `TEST-` for sandbox)
-- `NGROK_URL`: Required for payment webhooks in development
-
-## Development Workflow
-
-### Quick Start
-```pwsh
-docker compose up -d --build
-docker compose exec backend bash -lc "alembic -c app/alembic/alembic.ini upgrade head"
-curl http://localhost:8000/health
-```
-
-### Useful Commands
-```pwsh
-make logs-backend          # Tail backend logs
-make shell                 # Bash into backend container
-make test                  # Run pytest
-make poetry-add PKG=name   # Add dependency via Poetry
-make health                # Check all services health
-```
-
-### Services & Ports
-| Service | Port | Credentials |
-|---------|------|-------------|
-| API | 8000 | - |
-| PostgreSQL | 5432 | tickets/tickets |
-| Redis | 6379 | - |
-| MinIO | 9000 (API), 9003 (console) | minio/minio12345 |
-| Mailhog | 8025 | - |
-| PDF Service | 9002 | - |
-
-### Testing Payment Webhooks
-MercadoPago/Payku webhooks require public URLs. Use ngrok:
-```pwsh
-ngrok http 8000
-# Set NGROK_URL in .env, restart backend
-```
-
-## Code Patterns
-
-### Adding New Endpoints
-1. Create Pydantic models in `services/<domain>/models/`
-2. Add route in `services/<domain>/routes/` with appropriate auth dependency
-3. Implement business logic in `services/<domain>/services/`
-4. Register router in `main.py` with prefix and tags
-
-### Database Queries
+### Authentication
 ```python
-# Always use async SQLAlchemy patterns:
-async with db.begin():
-    result = await db.execute(select(Model).where(...))
-    item = result.scalar_one_or_none()
-```
+from shared.auth.dependencies import get_current_user, get_current_admin, get_current_admin_or_coordinator
 
-### Caching Pattern
+@router.get("/protected")
+async def protected(current_user: Dict = Depends(get_current_user)): ...
+
+@router.post("/admin-only")
+async def admin_only(admin: Dict = Depends(get_current_admin)): ...
+```
+Roles: `user`, `admin`, `scanner`, `coordinator`
+
+### Caching & Idempotency
 ```python
-cache_key = f"entity:{id}"
+from shared.cache.redis_client import cache_get, cache_set, DistributedLock
+
+# Idempotency pattern for purchases
+cache_key = f"purchase:idempotency:{idempotency_key}"
 cached = await cache_get(cache_key)
 if cached:
     return cached
-# ... compute result
-await cache_set(cache_key, result, ttl=300)
 ```
 
-### Idempotency (Purchases)
-Purchase requests use `idempotency_key` combining user/items/payment_method to prevent duplicates. Check Redis cache before processing.
+### Error Handling Convention
+- Services raise `ValueError` for business logic errors
+- Routes catch and convert to `HTTPException(status_code=400, detail=str(e))`
+- Use 409 for conflicts (duplicate idempotency key, ticket already scanned)
 
-## External Integrations
+## Development Workflow
 
-### Supabase
-- Auth tokens validated via `shared/auth/supabase_validator.py`
-- User roles stored in `app_metadata.role`
-- Database can use Supabase PostgreSQL (set `DATABASE_URL` in `.env`)
+### Local Development (Docker)
+```pwsh
+docker compose up -d --build
+docker compose exec backend bash -lc "alembic -c app/alembic/alembic.ini upgrade head"
+```
 
-### MercadoPago
-- Sandbox requires `TEST-` prefixed tokens
-- Webhook URL must be publicly accessible (ngrok for dev)
-- See `docs/MERCADOPAGO_SETUP.md` for credential setup
+### Without Docker
+```pwsh
+poetry install
+poetry run uvicorn main:app --reload
+poetry run celery -A app.worker:celery_app worker -l INFO
+```
+
+### Key Ports
+API: 8000 | Postgres: 5432 | Redis: 6379 | MinIO: 9000/9003 | PDF: 9002
+
+## Configuration
+
+Environment via `app/core/config.py` (pydantic-settings):
+- `DATABASE_URL` - PostgreSQL connection (supports Supabase)
+- `REDIS_URL` - Redis for cache/celery
+- `RESEND_API_KEY` - Email service
+- `MERCADOPAGO_ACCESS_TOKEN`, `PAYKU_TOKEN_PUBLICO/PRIVADO` - Payment providers
+- `FRONTEND_URL`, `NGROK_URL` - Webhook return URLs
 
 ## Important Files
-- `env.template`: All environment variables with descriptions
-- `Makefile`: All development commands
-- `docker-compose.yml`: Local development stack
-- `docs/`: Detailed documentation for specific features
+
+- `shared/database/models.py` - SQLAlchemy models (User, Event, Order, Ticket, TicketType, etc.)
+- `shared/auth/dependencies.py` - Auth decorators
+- `services/ticket_purchase/services/purchase_service.py` - Core purchase logic
+- `services/notifications/services/email_service.py` - Resend email + QR generation
+- `main.py` - App initialization, CORS, rate limiting

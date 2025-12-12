@@ -5,9 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.sql import func
 from typing import Dict, Optional
+import logging
 from shared.database.session import get_db
 from shared.database.models import Order, Event
 from shared.auth.dependencies import get_current_user, get_optional_user
+from shared.utils.rate_limiter import limiter, RATE_LIMITS
 from services.ticket_purchase.models.purchase import (
     PurchaseRequest,
     PurchaseResponse,
@@ -15,41 +17,44 @@ from services.ticket_purchase.models.purchase import (
 )
 from services.ticket_purchase.services.purchase_service import PurchaseService
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
 @router.post("", response_model=PurchaseResponse)
+@limiter.limit(RATE_LIMITS["purchase"])  # 10 intentos por minuto por IP
 async def create_purchase(
-    request: PurchaseRequest,
+    request: Request,  # Necesario para rate limiter
+    purchase_request: PurchaseRequest,
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Dict] = Depends(get_optional_user)
 ):
     """
     Crear orden de compra y generar link de pago
-    
+
     Compatible con: ticketsService.purchaseTickets()
-    
+
     NOTA: user_id es opcional ahora. Si se proporciona sin autenticación, se ignora y la compra es anónima.
     Si se proporciona con autenticación, debe coincidir con el usuario autenticado.
     """
     import logging
     logger = logging.getLogger(__name__)
-    
+
     # Manejar user_id con try-except para mayor robustez
     try:
         # Si se proporciona user_id, validar solo si hay autenticación
-        if request.user_id:
+        if purchase_request.user_id:
             if current_user:
                 # Usuario autenticado: validar que el user_id coincida
-                if current_user.get("user_id") != request.user_id:
+                if current_user.get("user_id") != purchase_request.user_id:
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="No puedes crear órdenes para otros usuarios"
                     )
             else:
                 # No hay autenticación: ignorar user_id y tratar como compra anónima
-                request.user_id = None
+                purchase_request.user_id = None
         else:
             # No se proporcionó user_id
             # Si hay usuario autenticado y es admin/coordinator, requerir user_id
@@ -72,12 +77,12 @@ async def create_purchase(
     except Exception as validation_error:
         logger.warning(f"Error en validación de user_id: {validation_error}")
         # Si hay error, ignorar user_id y continuar como compra anónima
-        request.user_id = None
-    
+        purchase_request.user_id = None
+
     service = PurchaseService()
-    
+
     try:
-        result = await service.create_purchase(db, request)
+        result = await service.create_purchase(db, purchase_request)
         response = PurchaseResponse(**result)
         return response
     except ValueError as e:
@@ -95,32 +100,33 @@ async def create_purchase(
 
 
 @router.post("/webhook")
+@limiter.limit(RATE_LIMITS["webhook"])  # 100 por minuto para webhooks de payment providers
 async def mercado_pago_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Webhook para recibir notificaciones de Mercado Pago
-    
+
     No requiere autenticación (Mercado Pago valida la firma)
     """
     service = PurchaseService()
-    
+
     try:
         # Obtener headers necesarios para verificación
         signature = request.headers.get("x-signature")
         request_id = request.headers.get("x-request-id")
-        
+
         # Obtener query params
         query_params = dict(request.query_params)
-        
+
         # Obtener body
         data = await request.json()
-        
+
         import logging
         logger = logging.getLogger(__name__)
         logger.info(f"Webhook recibido - x-signature: {signature is not None}, x-request-id: {request_id}")
-        
+
         # Verificar firma del webhook
         mercado_pago_service = service.mercado_pago_service
         is_valid = mercado_pago_service.verify_webhook(
@@ -129,15 +135,15 @@ async def mercado_pago_webhook(
             request_id=request_id,
             query_params=query_params
         )
-        
+
         if not is_valid:
             logger.warning("Webhook con firma inválida, pero procesando de todas formas (modo desarrollo)")
             # En producción, podrías retornar 401 aquí
-        
+
         # Procesar webhook
         success = await service.process_payment_webhook(db, data)
         logger.info(f"Webhook procesado - resultado: {success}")
-        
+
         if success:
             return {"status": "ok"}
         else:
@@ -151,66 +157,67 @@ async def mercado_pago_webhook(
 
 
 @router.post("/payku-webhook")
+@limiter.limit(RATE_LIMITS["webhook"])  # 100 por minuto para webhooks de payment providers
 async def payku_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Webhook para recibir notificaciones de Payku
-    
+
     No requiere autenticación (Payku valida la firma)
     """
     service = PurchaseService()
-    
+
     try:
         # Obtener body
         data = await request.json()
-        
+
         import logging
         logger = logging.getLogger(__name__)
         logger.info("Webhook Payku recibido")
-        
+
         # Procesar webhook de Payku
         payku_service = service.payku_service
         webhook_info = payku_service.process_webhook(data)
-        
+
         # Obtener order_id del webhook
         order_id = webhook_info.get("order_id")
         if not order_id:
             logger.warning("No se encontró order_id en el webhook Payku")
             return {"status": "ignored", "message": "No order_id found"}
-        
+
         # Buscar orden
         from sqlalchemy import select
         from shared.database.models import Order
         stmt = select(Order).where(Order.id == order_id)
         result = await db.execute(stmt)
         order = result.scalar_one_or_none()
-        
+
         if not order:
             print(f"⚠️  [WEBHOOK PAYKU] Orden {order_id} no encontrada")
             return {"status": "ignored", "message": f"Order {order_id} not found"}
-        
+
         # Actualizar estado según el webhook
         status = webhook_info.get("status")
         print(f"🔔 [WEBHOOK PAYKU] Estado recibido: {status}")
-        
+
         if status == "approved":
             # CRÍTICO: Capturar valores ANTES de cualquier operación que pueda causar rollback
             order_id_str = str(order.id)
             idempotency_key_str = str(order.idempotency_key) if order.idempotency_key else None
-            
+
             print(f"✅ [WEBHOOK PAYKU] Pago aprobado! Actualizando orden {order_id_str} a 'completed'")
             order.status = "completed"
             order.paid_at = datetime.utcnow()
             await db.flush()
-            
+
             # Intentar recuperar attendees - PRIORIDAD 1: desde la base de datos (más confiable)
             attendees_data = None
             if order.attendees_data:
                 attendees_data = order.attendees_data
                 print(f"🔍 [WEBHOOK PAYKU] ✅ Attendees recuperados de la base de datos: {len(attendees_data)}")
-            
+
             # PRIORIDAD 2: Si no están en BD, intentar desde cache
             if not attendees_data and idempotency_key_str:
                 from shared.cache.redis_client import cache_get
@@ -223,7 +230,7 @@ async def payku_webhook(
                     # Guardar en BD para futuras referencias
                     order.attendees_data = attendees_data
                     await db.flush()
-            
+
             # OPTIMIZACIÓN: Generar tickets en background (no bloquea respuesta del webhook)
             # CRÍTICO: Los tickets SIEMPRE deben crearse con los datos del formulario
             try:
@@ -294,26 +301,26 @@ async def payku_webhook(
                     print(f"❌ [WEBHOOK PAYKU] Error crítico al hacer commit: {str(commit_error)}")
                     await db.rollback()
                 print(f"⚠️  [WEBHOOK PAYKU] Orden {order_id_str} marcada como completed sin tickets. Se pueden generar manualmente.")
-            
+
             return {"status": "ok", "message": "Payment approved and tickets generated"}
-            
+
         elif status in ["rejected", "cancelled"]:
             print(f"❌ [WEBHOOK PAYKU] Pago rechazado/cancelado. Actualizando orden {order.id} a 'cancelled'")
             order.status = "cancelled"
             await db.commit()
-            
+
             # Liberar capacidad
             for order_item in order.order_items:
                 await service.inventory_service.release_capacity(
                     db, str(order_item.event_id), order_item.quantity, "payment_failed"
                 )
-            
+
             return {"status": "ok", "message": "Payment cancelled"}
-        
+
         # Si el estado es "pending", el webhook se recibió pero el pago aún no está aprobado
         print(f"⏳ [WEBHOOK PAYKU] Estado '{status}' - El pago aún está pendiente.")
         return {"status": "ignored", "message": f"Payment still {status}"}
-        
+
     except Exception as e:
         # Log error pero retornar 200 para que Payku no reintente inmediatamente
         print(f"Error procesando webhook de Payku: {e}")
@@ -332,7 +339,7 @@ async def verify_payku_payment(
     Útil cuando el webhook no llega o hay problemas
     """
     service = PurchaseService()
-    
+
     try:
         # Buscar orden
         from sqlalchemy import select
@@ -340,34 +347,30 @@ async def verify_payku_payment(
         stmt = select(Order).where(Order.id == order_id)
         result = await db.execute(stmt)
         order = result.scalar_one_or_none()
-        
+
         if not order:
             raise HTTPException(status_code=404, detail="Orden no encontrada")
-        
+
         if order.payment_provider != "payku":
             raise HTTPException(status_code=400, detail="Esta orden no es de Payku")
-        
+
         if not order.payment_reference:
             raise HTTPException(status_code=400, detail="No hay payment_reference para verificar")
-        
-        # Verificar estado en Payku
+
+        # Verificar estado en Payku (ASYNC)
         payku_service = service.payku_service
-        transaction_data = payku_service.verify_transaction(order.payment_reference)
-        
-        print(f"🔍 [VERIFY PAYKU] Estado de transacción {order.payment_reference}: {transaction_data}")
-        
+        transaction_data = await payku_service.verify_transaction(order.payment_reference)
+
+        logger.info(f"Estado de transacción Payku {order.payment_reference}: {transaction_data.get('status')}")
+
         # Procesar según el estado
-        # Payku puede devolver el estado en diferentes formatos
         status = transaction_data.get("status", "").lower()
-        
+
         # También verificar en payment.status si existe
         payment_data = transaction_data.get("payment", {})
         if payment_data and payment_data.get("status"):
             status = payment_data.get("status", "").lower()
-        
-        print(f"🔍 [VERIFY PAYKU] Estado procesado: {status}")
-        print(f"🔍 [VERIFY PAYKU] Transaction data completo: {transaction_data}")
-        
+
         # Mapear estados de Payku
         if status in ["success", "approved", "completado", "completed"]:
             # Pago exitoso - actualizar orden
@@ -375,7 +378,7 @@ async def verify_payku_payment(
                 order.status = "completed"
                 order.paid_at = datetime.utcnow()
                 await db.flush()
-                
+
                 # Intentar recuperar attendees del cache
                 attendees_data = None
                 if order.idempotency_key:
@@ -383,7 +386,7 @@ async def verify_payku_payment(
                     attendees_cache_key = f"purchase:attendees:{order.idempotency_key}"
                     attendees_data = await cache_get(attendees_cache_key)
                     print(f"🔍 [VERIFY PAYKU] Attendees del cache: {attendees_data}")
-                
+
                 # Si no hay attendees en cache, intentar obtenerlos de otra forma
                 # Por ahora, generar tickets sin attendees (usará valores por defecto)
                 if not attendees_data:
@@ -399,20 +402,20 @@ async def verify_payku_payment(
                         from shared.database.models import OrderItem, Ticket, TicketType
                         from shared.utils.qr_generator import generate_qr_signature
                         import uuid
-                        
+
                         stmt_items = select(OrderItem).where(OrderItem.order_id == order.id)
                         result_items = await db.execute(stmt_items)
                         order_items = result_items.scalars().all()
-                        
+
                         for order_item in order_items:
                             # Obtener tipo de ticket
                             stmt_type = select(TicketType).where(TicketType.id == order_item.ticket_type_id)
                             result_type = await db.execute(stmt_type)
                             ticket_type = result_type.scalar_one_or_none()
-                            
+
                             if not ticket_type:
                                 continue
-                            
+
                             # Crear tickets básicos
                             for i in range(order_item.quantity):
                                 ticket_id = uuid.uuid4()
@@ -430,12 +433,12 @@ async def verify_payku_payment(
                                     issued_at=datetime.utcnow()
                                 )
                                 db.add(ticket)
-                        
+
                         await db.flush()
                         print(f"✅ [VERIFY PAYKU] Tickets básicos creados exitosamente")
-                
+
                 await db.commit()
-                
+
                 return {"status": "ok", "message": "Pago verificado y tickets generados", "order_status": "completed"}
             else:
                 return {"status": "ok", "message": "Pago ya estaba completado", "order_status": "completed"}
@@ -444,18 +447,18 @@ async def verify_payku_payment(
             if order.status != "cancelled":
                 order.status = "cancelled"
                 await db.commit()
-                
+
                 # Liberar capacidad
                 for order_item in order.order_items:
                     await service.inventory_service.release_capacity(
                         db, str(order_item.event_id), order_item.quantity, "payment_failed"
                     )
-            
+
             return {"status": "ok", "message": "Pago rechazado", "order_status": "cancelled"}
         else:
             # Pendiente
             return {"status": "pending", "message": "Pago aún pendiente", "order_status": order.status}
-            
+
     except Exception as e:
         print(f"Error verificando pago Payku: {e}")
         import traceback
@@ -471,33 +474,33 @@ async def get_order_status(
 ):
     """
     Obtener estado de una orden
-    
+
     Compatible con: ticketsService.getOrderStatus()
-    
+
     NOTA: Para compras anónimas, se permite verificar el estado sin autenticación
     usando solo el order_id (que es un UUID único).
     """
     service = PurchaseService()
     order_status = await service.get_order_status(db, order_id)
-    
+
     if not order_status:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Orden no encontrada"
         )
-    
+
     # Obtener orden completa para verificar user_id
     # select y Order ya están importados al inicio del archivo
     stmt = select(Order).where(Order.id == order_id)
     result = await db.execute(stmt)
     order = result.scalar_one_or_none()
-    
+
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Orden no encontrada"
         )
-    
+
     # Verificar acceso:
     # 1. Si la orden es anónima (sin user_id), permitir acceso sin autenticación
     #    (el order_id es un UUID único, suficiente para verificar)
@@ -519,7 +522,7 @@ async def get_order_status(
                 )
     # Si no tiene user_id (compra anónima), permitir acceso sin autenticación
     # El order_id es suficiente para verificar el estado
-    
+
     return OrderStatusResponse(**order_status)
 
 
@@ -530,12 +533,12 @@ async def process_payment(
 ):
     """
     Procesar pago con token del Payment Brick
-    
+
     Recibe el token y datos del pago del Payment Brick y crea el pago en Mercado Pago
     """
     try:
         data = await request.json()
-        
+
         # Extraer datos del request
         token = data.get("token")
         order_id = data.get("order_id")
@@ -544,7 +547,7 @@ async def process_payment(
         issuer_id = data.get("issuer_id")
         installments = data.get("installments", 1)
         device_id = data.get("device_id")  # Device ID de Mercado Pago (importante para aprobación)
-        
+
         # Extraer datos del payer
         payer_data = data.get("payer", {})
         payer_email = payer_data.get("email")
@@ -561,7 +564,7 @@ async def process_payment(
                 payer_last_name = name_parts[1]
             else:
                 payer_last_name = payer_first_name  # Si solo hay un nombre, usar el mismo para ambos
-        
+
         # Log para debugging
         print(f"[DEBUG process_payment] Datos recibidos:")
         print(f"[DEBUG process_payment]   - token: {token[:20] if token else None}...")
@@ -576,36 +579,36 @@ async def process_payment(
         print(f"[DEBUG process_payment]   - payer_last_name: {payer_last_name}")
         print(f"[DEBUG process_payment]   - payer completo: {payer_data}")
         print(f"[DEBUG process_payment]   - device_id: {device_id if device_id else 'NO DISPONIBLE'}")
-        
+
         if not token:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Token es requerido"
             )
-        
+
         if not order_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="order_id es requerido"
             )
-        
+
         # Obtener la orden para validar y obtener el monto
         from sqlalchemy import select
         from shared.database.models import Order
         stmt = select(Order).where(Order.id == order_id)
         result = await db.execute(stmt)
         order = result.scalar_one_or_none()
-        
+
         if not order:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Orden no encontrada"
             )
-        
+
         # Usar el monto de la orden si no se proporciona
         if not transaction_amount:
             transaction_amount = float(order.total or 0)
-        
+
         # IMPORTANTE: Payment Brick puede no enviar el nombre del titular en el objeto payer
         # Necesitamos obtenerlo de otra fuente o usar un fallback inteligente
         # Envolver todo en try-except para mayor robustez
@@ -613,8 +616,8 @@ async def process_payment(
             from app.core.config import settings
             is_sandbox = settings.MERCADOPAGO_ENVIRONMENT == "sandbox"
             is_test_card = (
-                payer_identification and 
-                payer_identification.get("type") == "Otro" and 
+                payer_identification and
+                payer_identification.get("type") == "Otro" and
                 payer_identification.get("number") == "123456789"
             )
         except Exception as config_error:
@@ -622,11 +625,11 @@ async def process_payment(
             # Valores por defecto seguros
             is_sandbox = True  # Asumir sandbox por defecto para seguridad
             is_test_card = (
-                payer_identification and 
-                payer_identification.get("type") == "Otro" and 
+                payer_identification and
+                payer_identification.get("type") == "Otro" and
                 payer_identification.get("number") == "123456789"
             )
-        
+
         # PRIORIDAD 1: Si es una tarjeta de prueba, usar "APRO" directamente
         # Esto es CRÍTICO porque Mercado Pago requiere "APRO" para tarjetas de prueba
         # Funciona tanto en sandbox como en producción
@@ -637,7 +640,7 @@ async def process_payment(
                 print(f"[DEBUG process_payment] ✅ TARJETA DE PRUEBA DETECTADA - Usando 'APRO' como nombre del titular (requerido por Mercado Pago)")
         except Exception as test_card_error:
             print(f"[WARNING process_payment] Error verificando tarjeta de prueba: {test_card_error}")
-        
+
         # PRIORIDAD 2: Si no hay nombre del titular del payer Y NO es tarjeta de prueba,
         # intentar obtenerlo del primer ticket de la orden
         # Esto es importante porque Payment Brick puede no enviar el nombre del titular
@@ -656,7 +659,7 @@ async def process_payment(
                 )
                 result_tickets = await db.execute(stmt_tickets)
                 first_ticket = result_tickets.scalar_one_or_none()
-                
+
                 if first_ticket:
                     # IMPORTANTE: Si es tarjeta de prueba, NO usar el nombre del ticket, usar "APRO"
                     if is_sandbox and is_test_card:
@@ -674,7 +677,7 @@ async def process_payment(
                 # Si hay un error de conexión a la base de datos, usar fallback
                 print(f"[WARNING process_payment] Error de conexión a la base de datos al obtener ticket: {db_error}")
                 print(f"[WARNING process_payment] Continuando con fallback para obtener nombre del titular...")
-            
+
             # Si aún no hay nombre después de intentar obtenerlo del ticket, intentar otros métodos
             if not payer_first_name:
                 # Si no hay tickets aún (la orden se creó pero los tickets aún no se generaron),
@@ -703,7 +706,7 @@ async def process_payment(
                                     print(f"[DEBUG process_payment] Usando nombre del attendee del cache como fallback: {payer_first_name} {payer_last_name}")
                     except Exception as cache_error:
                         print(f"[WARNING process_payment] Error obteniendo attendees del cache: {cache_error}")
-                
+
                 # Si aún no hay nombre, usar un fallback inteligente
                 if not payer_first_name:
                     try:
@@ -733,7 +736,7 @@ async def process_payment(
                         else:
                             payer_first_name = "Usuario"
                             payer_last_name = "Test"
-        
+
         # VERIFICACIÓN FINAL: Si es tarjeta de prueba, FORZAR "APRO" sin importar qué
         # Esto es CRÍTICO porque Mercado Pago requiere "APRO" para tarjetas de prueba
         try:
@@ -752,14 +755,14 @@ async def process_payment(
                     print(f"[DEBUG process_payment] Forzando 'APRO' como último recurso para tarjeta de prueba")
             except Exception:
                 pass  # Si todo falla, continuar con lo que tengamos
-        
+
         # Crear descripción
         description = f"Compra de tickets - Orden {order_id}"
-        
+
         # Crear el pago en Mercado Pago
         service = PurchaseService()
         mercado_pago_service = service.mercado_pago_service
-        
+
         payment = mercado_pago_service.create_payment_with_token(
             token=token,
             transaction_amount=transaction_amount,
@@ -774,20 +777,20 @@ async def process_payment(
             external_reference=order_id,
             device_id=device_id  # Device ID para mejorar aprobación
         )
-        
+
         # Actualizar la orden con el payment_id
         order.payment_reference = str(payment.get("id"))
-        
+
         # Verificar el estado del pago inmediatamente
         payment_status = payment.get("status")
         payment_status_detail = payment.get("status_detail")
-        
+
         print(f"[DEBUG process_payment] Estado del pago recibido: {payment_status} (detail: {payment_status_detail})")
-        
+
         # Si el pago fue rechazado inmediatamente, actualizar el estado de la orden
         if payment_status in ["rejected", "cancelled", "refunded"]:
             print(f"❌ [process_payment] Pago rechazado inmediatamente. Actualizando orden {order_id} a 'cancelled'")
-            
+
             # Cargar order_items ANTES de hacer commit (necesario para evitar MissingGreenlet)
             from sqlalchemy.orm import selectinload
             from shared.database.models import OrderItem
@@ -795,17 +798,17 @@ async def process_payment(
                 select(OrderItem).where(OrderItem.order_id == order.id)
             )
             order_items = result.scalars().all()
-            
+
             order.status = "cancelled"
             await db.commit()
-            
+
             # Liberar capacidad
             service = PurchaseService()
             for order_item in order_items:
                 await service.inventory_service.release_capacity(
                     db, str(order_item.event_id), order_item.quantity, "payment_failed"
                 )
-            
+
             await db.refresh(order)
         elif payment_status == "approved":
             # Si el pago fue aprobado inmediatamente, actualizar el estado
@@ -813,7 +816,7 @@ async def process_payment(
             order.status = "completed"
             order.paid_at = datetime.utcnow()
             await db.commit()
-            
+
             # Generar tickets
             service = PurchaseService()
             try:
@@ -825,7 +828,7 @@ async def process_payment(
                 # Marcar orden como paid aunque falle la generación de tickets
                 order.status = "completed"
                 await db.commit()
-            
+
             await db.refresh(order)
         else:
             # Si el pago está pendiente, solo guardar el payment_reference
@@ -833,14 +836,14 @@ async def process_payment(
             print(f"⏳ [process_payment] Pago en estado '{payment_status}'. Esperando webhook para actualizar estado.")
             await db.commit()
             await db.refresh(order)
-        
+
         return {
             "payment_id": payment.get("id"),
             "status": payment.get("status"),
             "status_detail": payment.get("status_detail"),
             "order_id": order_id
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -849,14 +852,14 @@ async def process_payment(
         error_message = str(e)
         print(f"[ERROR process_payment] Exception: {error_message}")
         print(f"[ERROR process_payment] Traceback completo: {error_trace}")
-        
+
         # Si el error viene de Mercado Pago, incluir más detalles
         if "Error creando pago" in error_message:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=error_message
             )
-        
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error procesando pago: {error_message}"
@@ -870,13 +873,13 @@ async def admin_list_completed_orders(
 ):
     """
     Listar órdenes completadas para reenvío de tickets
-    
+
     Query params:
     - limit: Máximo de órdenes a retornar (default: 50)
     """
     try:
         from shared.database.models import Order, Ticket, OrderItem
-        
+
         # Buscar órdenes completadas
         result = await db.execute(
             select(Order)
@@ -885,7 +888,7 @@ async def admin_list_completed_orders(
             .limit(limit)
         )
         orders = result.scalars().all()
-        
+
         # Para cada orden, obtener información de tickets
         orders_data = []
         for order in orders:
@@ -896,14 +899,14 @@ async def admin_list_completed_orders(
                 .where(OrderItem.order_id == order.id)
             )
             tickets = result_tickets.scalars().all()
-            
+
             # Solo incluir órdenes con al menos 1 ticket
             if not tickets:
                 continue
-            
+
             # Obtener email del primer ticket
             email = tickets[0].holder_email if tickets[0].holder_email else None
-            
+
             orders_data.append({
                 "order_id": str(order.id),
                 "status": order.status,
@@ -915,13 +918,13 @@ async def admin_list_completed_orders(
                 "email": email,
                 "payment_provider": order.payment_provider
             })
-        
+
         return {
             "success": True,
             "count": len(orders_data),
             "orders": orders_data
         }
-        
+
     except Exception as e:
         print(f"[ADMIN ERROR] Error listando órdenes: {e}")
         raise HTTPException(
@@ -938,38 +941,38 @@ async def admin_resend_tickets(
 ):
     """
     Reenviar tickets de una orden completada por email
-    
+
     Este endpoint:
     1. Busca la orden y verifica que esté completada
     2. Obtiene los tickets asociados
     3. Envía los tickets por email
-    
+
     Query params:
     - email (opcional): Email alternativo para enviar. Si no se proporciona, usa el email de los tickets
     """
     try:
         from shared.database.models import Order, Ticket, OrderItem
         from uuid import UUID
-        
+
         # Buscar la orden
         result = await db.execute(
             select(Order).where(Order.id == UUID(order_id))
         )
         order = result.scalar_one_or_none()
-        
+
         if not order:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Orden {order_id} no encontrada"
             )
-        
+
         # Verificar que la orden esté completada
         if order.status != "completed":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Solo se pueden reenviar tickets de órdenes completadas. Estado actual: {order.status}"
             )
-        
+
         # Buscar tickets de la orden haciendo JOIN con OrderItem
         result = await db.execute(
             select(Ticket)
@@ -977,49 +980,49 @@ async def admin_resend_tickets(
             .where(OrderItem.order_id == order.id)
         )
         tickets = result.scalars().all()
-        
+
         if not tickets:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No se encontraron tickets para esta orden"
             )
-        
+
         # Determinar email destino
         target_email = email if email else tickets[0].holder_email
-        
+
         if not target_email:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No se pudo determinar el email destino. Proporciona un email como parámetro."
             )
-        
+
         print(f"[RESEND] Reenviando {len(tickets)} tickets de orden {order_id} a {target_email}")
-        
+
         # Obtener información del evento
         first_ticket = tickets[0]
         result_event = await db.execute(
             select(Event).where(Event.id == first_ticket.event_id)
         )
         event = result_event.scalar_one_or_none()
-        
+
         if not event:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No se encontró el evento asociado a los tickets"
             )
-        
+
         # Formatear fecha del evento
         from datetime import datetime
         event_date_str = "Fecha no especificada"
         event_location_str = event.location_text or "Ubicación no especificada"
-        
+
         if event.starts_at:
             try:
                 if isinstance(event.starts_at, str):
                     event_datetime = datetime.fromisoformat(event.starts_at.replace("Z", "+00:00"))
                 else:
                     event_datetime = event.starts_at
-                
+
                 # Formatear fecha en español
                 event_date_str = event_datetime.strftime("%d de %B, %Y")
                 # Reemplazar nombres de meses en inglés por español
@@ -1033,21 +1036,21 @@ async def admin_resend_tickets(
                     event_date_str = event_date_str.replace(en, es)
             except Exception as e:
                 print(f"Error formateando fecha del evento: {e}")
-        
+
         # Enviar emails con tickets
         from services.notifications.services.email_service import EmailService
         email_service = EmailService()
-        
+
         emails_sent = 0
         emails_failed = 0
-        
+
         # Agrupar tickets por email (por si hay múltiples destinatarios)
         from collections import defaultdict
         tickets_by_email = defaultdict(list)
         for ticket in tickets:
             email_key = target_email.lower().strip()
             tickets_by_email[email_key].append(ticket)
-        
+
         # Enviar un email por cada ticket (o agrupar si es el mismo email)
         for email, user_tickets in tickets_by_email.items():
             for ticket in user_tickets:
@@ -1055,7 +1058,7 @@ async def admin_resend_tickets(
                     attendee_name = f"{ticket.holder_first_name} {ticket.holder_last_name}".strip()
                     if not attendee_name:
                         attendee_name = "Estimado/a"
-                    
+
                     success = await email_service.send_ticket_email(
                         to_email=email,
                         attendee_name=attendee_name,
@@ -1065,7 +1068,7 @@ async def admin_resend_tickets(
                         ticket_id=str(ticket.id)[:8].upper(),
                         qr_signature=ticket.qr_signature  # Pasar QR signature para generar imagen
                     )
-                    
+
                     if success:
                         emails_sent += 1
                     else:
@@ -1073,7 +1076,7 @@ async def admin_resend_tickets(
                 except Exception as e:
                     print(f"Error enviando email para ticket {ticket.id}: {e}")
                     emails_failed += 1
-        
+
         return {
             "success": True,
             "order_id": str(order.id),
@@ -1083,7 +1086,7 @@ async def admin_resend_tickets(
             "emails_failed": emails_failed,
             "message": f"Se enviaron {emails_sent} email(s) con {len(tickets)} ticket(s)" if emails_sent > 0 else f"Error: No se pudieron enviar los emails ({emails_failed} fallos)"
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1103,66 +1106,66 @@ async def admin_complete_order(
 ):
     """
     Endpoint administrativo para completar una orden manualmente y enviar tickets
-    
+
     SOLO PARA DESARROLLO/TESTING
-    
+
     Este endpoint:
     1. Marca la orden como completada
     2. Genera los tickets
     3. Envía los emails con los tickets
-    
+
     Útil para probar el flujo sin pagos reales
     """
     service = PurchaseService()
-    
+
     try:
         # Importar modelos necesarios
         from shared.database.models import Order
         from uuid import UUID
-        
+
         # Buscar la orden
         result = await db.execute(
             select(Order).where(Order.id == UUID(order_id))
         )
         order = result.scalar_one_or_none()
-        
+
         if not order:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Orden {order_id} no encontrada"
             )
-        
+
         # Verificar que la orden esté en pending
         if order.status != "pending":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"La orden ya está en estado '{order.status}'. Solo se pueden completar órdenes en 'pending'"
             )
-        
+
         print(f"[ADMIN] Completando orden manualmente: {order_id}")
         print(f"[ADMIN] Orden actual - Status: {order.status}, Provider: {order.payment_provider}")
-        
+
         # Actualizar orden a completada
         order.status = "completed"
         order.paid_at = func.now()
         await db.commit()
         await db.refresh(order)
-        
+
         print(f"[ADMIN] Orden actualizada a 'completed'")
-        
+
         # Cargar order_items para saber cuántos tickets generar
         from shared.database.models import OrderItem
         result_items = await db.execute(
             select(OrderItem).where(OrderItem.order_id == order.id)
         )
         order_items = result_items.scalars().all()
-        
+
         if not order_items:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No se encontraron items para esta orden"
             )
-        
+
         # Crear datos de attendees genéricos
         attendees_data = []
         for idx, item in enumerate(order_items):
@@ -1174,9 +1177,9 @@ async def admin_complete_order(
                     "document_number": None,
                     "is_child": False
                 })
-        
+
         print(f"[ADMIN] Creados {len(attendees_data)} attendees genéricos")
-        
+
         # Generar tickets
         tickets = await service._generate_tickets(
             db=db,
@@ -1184,14 +1187,14 @@ async def admin_complete_order(
             attendees_data=attendees_data,
             ticket_status="issued"
         )
-        
+
         print(f"[ADMIN] Generados {len(tickets)} tickets")
-        
+
         # Enviar emails con tickets
         # TODO: Implementar envío de emails cuando el servicio de email esté configurado
         print(f"[ADMIN] ⚠️  Email no enviado - Servicio de email no configurado")
         print(f"[ADMIN] Los tickets fueron generados y están disponibles en la base de datos")
-        
+
         return {
             "success": True,
             "order_id": str(order.id),
@@ -1201,7 +1204,7 @@ async def admin_complete_order(
             "ticket_ids": [str(t.id) for t in tickets],
             "message": "Orden completada manualmente. Tickets generados correctamente."
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:

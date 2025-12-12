@@ -1,8 +1,6 @@
 """API Gateway principal - Punto de entrada de la aplicación"""
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import os
 import logging
@@ -10,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from shared.database.connection import init_db, close_db
 from shared.cache.redis_client import init_redis, close_redis
-from shared.utils.rate_limiter import limiter
+from shared.utils.rate_limiter import limiter, rate_limit_exceeded_handler
 
 # Configurar logging
 logging.basicConfig(
@@ -73,7 +71,7 @@ app.add_middleware(
 
 # Configurar rate limiting DESPUÉS de CORS
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 # Incluir routers de cada servicio
 from services.ticket_validation.routes.validation import router as validation_router

@@ -11,6 +11,9 @@ x-common-database: &common-database
 
 x-common-redis: &common-redis
   REDIS_URL: redis://redis:6379/0
+  # Configuración de pool para desarrollo
+  REDIS_MAX_CONNECTIONS: ${REDIS_MAX_CONNECTIONS:-20}
+  CELERY_REDIS_MAX_CONNECTIONS: ${CELERY_REDIS_MAX_CONNECTIONS:-20}
 
 services:
   db:
@@ -34,6 +37,13 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    # Configuración optimizada para desarrollo
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 128mb
+      --maxmemory-policy allkeys-lru
+      --maxclients 500
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -63,6 +73,8 @@ services:
     build: .
     environment:
       <<: [*common-database, *common-redis, *common-minio]
+      APP_ENV: development
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
       JWT_SECRET: ${JWT_SECRET:-dev-secret}
       QR_SECRET: ${QR_SECRET:-dev-qr}
       # Resend Configuration
@@ -76,9 +88,21 @@ services:
       MERCADOPAGO_PUBLIC_KEY: ${MERCADOPAGO_PUBLIC_KEY:-}
       MERCADOPAGO_WEBHOOK_SECRET: ${MERCADOPAGO_WEBHOOK_SECRET:-}
       MERCADOPAGO_ENVIRONMENT: ${MERCADOPAGO_ENVIRONMENT:-sandbox}
+      # Payku Configuration
+      PAYKU_TOKEN_PUBLICO: ${PAYKU_TOKEN_PUBLICO:-}
+      PAYKU_TOKEN_PRIVADO: ${PAYKU_TOKEN_PRIVADO:-}
+      PAYKU_ENVIRONMENT: ${PAYKU_ENVIRONMENT:-sandbox}
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
       NGROK_URL: ${NGROK_URL:-}
       POETRY_VIRTUALENVS_CREATE: "false"
+      # DB Pool config para desarrollo (reducido para Supabase remoto)
+      DATABASE_POOL_SIZE: "3"
+      DATABASE_MAX_OVERFLOW: "5"
+    # DNS configuration para mejorar resolución de nombres externos
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
     depends_on:
       db:
         condition: service_healthy
@@ -95,21 +119,42 @@ services:
       - /app/.poetry
     command: ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
+  # Worker Celery para desarrollo (todas las colas en uno)
   worker:
     build: .
     environment:
       <<: [*common-database, *common-redis, *common-minio]
+      APP_ENV: development
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Resend Configuration
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-onboarding@resend.dev}
       QR_SECRET: ${QR_SECRET:-dev-qr}
       POETRY_VIRTUALENVS_CREATE: "false"
+      # DB Pool config reducido para worker
+      DATABASE_POOL_SIZE: "2"
+      DATABASE_MAX_OVERFLOW: "3"
+    # DNS configuration para mejorar resolución de nombres externos
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
     depends_on:
       backend:
         condition: service_started
       redis:
         condition: service_healthy
-    command: ["python", "-m", "celery", "-A", "shared.cache.celery_app:celery_app", "worker", "-l", "INFO"]
+    volumes:
+      - .:/app
+      - /app/.venv
+      - /app/.poetry
+    # En desarrollo, un solo worker procesa todas las colas
+    command: >
+      celery -A shared.cache.celery_app:celery_app worker
+      -l INFO
+      --concurrency 2
+      --queues high_priority,default,low_priority
+      --hostname worker-dev@%h
 
   pdfsvc:
     build: ./pdfsvc
